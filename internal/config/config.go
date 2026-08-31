@@ -2665,10 +2665,10 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		Document:       Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
 		Review:         Review{PathInstructions: resolvePathInstructions(repo.Review.PathInstructions)},
 		PR: PR{
-		BaseBranch:        strings.TrimSpace(repo.PR.BaseBranch),
-		IssueLinkTemplate: resolveIssueLinkTemplate(repo.PR.IssueLinkTemplate),
-	},
-		ForgeProfiles:  global.ForgeProfiles,
+			BaseBranch:        strings.TrimSpace(repo.PR.BaseBranch),
+			IssueLinkTemplate: resolveIssueLinkTemplate(repo.PR.IssueLinkTemplate),
+		},
+		ForgeProfiles: global.ForgeProfiles,
 		// repo is the EffectiveRepoConfig result, so this value is already
 		// trusted-only (EffectiveRepoConfig sourced it from the trusted copy).
 		DisableProjectSettings: repo.DisableProjectSettings,
