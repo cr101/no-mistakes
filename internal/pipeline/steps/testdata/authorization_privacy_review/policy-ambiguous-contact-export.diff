@@ -1,0 +1,15 @@
+diff --git a/accounts/export.go b/accounts/export.go
+index 1111111..2222222 100644
+--- a/accounts/export.go
++++ b/accounts/export.go
+@@ -1,0 +1,11 @@
++package accounts
++
++func ContactExport(w io.Writer, customers []Customer) error {
++	for _, customer := range customers {
++		if _, err := fmt.Fprintf(w, "%s,%s\\n", customer.Name, customer.Email); err != nil {
++			return err
++		}
++	}
++	return nil
++}

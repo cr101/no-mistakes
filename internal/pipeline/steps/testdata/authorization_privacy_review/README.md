@@ -12,6 +12,7 @@ expectation.
 | `missing-tenant-filter.diff` | Invoices are private to their tenant. | Finding: the query accepts tenant context but does not constrain by tenant, exposing another tenant's invoices. |
 | `public-projection-leak.diff` | `InternalNotes` is staff-only; profile responses are public. | Finding: the public serializer projects the staff-only field. |
 | `secondary-log-disclosure.diff` | Password-reset tokens are secret and must not be logged. | Finding: the new log statement discloses the token to log readers. |
+| `policy-ambiguous-contact-export.diff` | The policy does not state whether customer email addresses may be exported to account managers. | `ask-user` finding: name the email export and request the missing policy decision; do not invent a privacy rule or auto-fix it. |
 | `shared-boundary-authorized.diff` | Users may change only their own email; administrators may change any user's email. | No authorization finding: every caller reaches the service-owned authorization check. |
 | `intentionally-public-data.diff` | Display names are intentionally public. | No privacy finding: the response exposes only data explicitly defined as public. |
 
