@@ -68,12 +68,14 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	}
 	ctx := sctx.Ctx
 	provider := resolvedProvider(sctx)
-	latestRun, err := sctx.DB.GetRun(sctx.Run.ID)
-	if err != nil {
-		return nil, fmt.Errorf("resolve closing issue references before PR handling: %w", err)
-	}
-	if len(latestRun.ClosingIssueRefs) > 0 && provider != scm.ProviderGitHub {
-		return nil, fmt.Errorf("render closing issues: --closes currently supports GitHub repositories only")
+	if sctx.DB != nil {
+		latestRun, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve closing issue references before PR handling: %w", err)
+		}
+		if latestRun != nil && len(latestRun.ClosingIssueRefs) > 0 && provider != scm.ProviderGitHub {
+			return nil, fmt.Errorf("render closing issues: --closes currently supports GitHub repositories only")
+		}
 	}
 
 	branch := sctx.Run.Branch

@@ -2781,8 +2781,8 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 			BaseBranch:        strings.TrimSpace(repo.PR.BaseBranch),
 			IssueLinkTemplate: resolveIssueLinkTemplate(repo.PR.IssueLinkTemplate),
 		},
-		ForgeProfiles:  global.ForgeProfiles,
-		Providers:      providers,
+		ForgeProfiles: global.ForgeProfiles,
+		Providers:     providers,
 		// repo is the EffectiveRepoConfig result, so this value is already
 		// trusted-only (EffectiveRepoConfig sourced it from the trusted copy).
 		DisableProjectSettings: repo.DisableProjectSettings,
