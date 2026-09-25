@@ -2588,10 +2588,11 @@ func validatePathInstructionGlob(pattern string) error {
 // PR title format, and providers) are always taken from the pushed copy, matching prior behavior,
 // since they cannot run arbitrary shell, select a process, or spend the
 // maintainer's CI minutes.
-// The exceptions inside test are evidence.branch, which names a git ref the
-// daemon pushes to, instructions, which steers the gate that validates the
-// pushed branch, and allow_approve_over_failure, which waives the required
-// check for an approved-over-failure commands.test. All three are trusted-only.
+// The exceptions inside test are prepare, which eagerly runs setup before an
+// agent-only Test, evidence.branch, which names a git ref the daemon pushes to,
+// instructions, which steers the gate that validates the pushed branch, and
+// allow_approve_over_failure, which waives the required check for an
+// approved-over-failure commands.test. All four are trusted-only.
 func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *RepoConfig {
 	if pushed == nil {
 		pushed = &RepoConfig{}
