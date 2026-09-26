@@ -127,6 +127,10 @@ func TestAgentOnlyPreparation_RestorationFailureRetainsSnapshot(t *testing.T) {
 			t.Fatalf("snapshot indexes=%v, err=%v", indexes, err)
 		}
 		snapshotDir = filepath.Dir(filepath.Dir(indexes[0]))
+		snapshotDir, err = filepath.EvalSymlinks(snapshotDir)
+		if err != nil {
+			t.Fatalf("resolve snapshot directory: %v", err)
+		}
 		return os.Remove(indexes[0]) // simulate an unreadable restoration input
 	}
 	_, err := (&TestStep{}).Execute(sctx)
