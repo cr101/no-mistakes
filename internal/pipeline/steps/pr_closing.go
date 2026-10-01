@@ -17,7 +17,9 @@ import (
 //   - explicit `axi run --closes` values, persisted on the run and claimed
 //     once by the PR step (sctx.ClosingIssueRefs);
 //   - standalone closing-keyword lines already in a live PR body that an
-//     ordinary (unowned) update is about to replace (sctx.PreservedClosingLines).
+//     ordinary (unowned) update is about to replace, or in the Issues section
+//     of an owned body's appendix that an owned update is about to replace
+//     (sctx.PreservedClosingLines).
 //
 // Both render in one stable `## Issues` section. An author-preserving
 // (pr.template) body keeps its author text verbatim, so only the explicit
@@ -208,16 +210,27 @@ func assembleDraftPRBody(sctx *pipeline.StepContext, whatChanged, riskLine, test
 	return appendIssuesSection(buildPRBodyWithin(whatChanged, riskLine, testingMD, pipelineMD, sctx, provider, maxPullRequestBodyBytes-reserve), section)
 }
 
-// ownedAuthorText is the author-owned text an owned (pr.template) update
-// keeps verbatim around its appendix: the live text outside the appendix, or
-// the freshly drafted narrative for an empty body.
-func ownedAuthorText(liveBody, emptyNarrative string) string {
-	if liveBody == "" {
-		return emptyNarrative
+// ownedPreservedClosingLines returns the closing lines of the Issues section
+// an owned body's previous appendix rendered, minus those whose targets the
+// verbatim author text already closes. Replacing that appendix must not
+// silently unlink an issue a previous run's --closes added.
+func ownedPreservedClosingLines(previousAppendix, authorText string) []string {
+	start := strings.LastIndex("\n"+previousAppendix, "\n"+issuesSectionHeading+"\n")
+	if start < 0 {
+		return nil
 	}
-	parts, err := parsePROwnedBody(liveBody)
-	if err != nil {
-		return liveBody
+	closed := closingTargets(extractClosingKeywordLines(authorText))
+	var lines []string
+	for _, line := range extractClosingKeywordLines(previousAppendix[start:]) {
+		covered := true
+		for target := range closingTargets([]string{line}) {
+			if _, ok := closed[target]; !ok {
+				covered = false
+			}
+		}
+		if !covered {
+			lines = append(lines, line)
+		}
 	}
-	return parts.before + "\n" + parts.after
+	return lines
 }

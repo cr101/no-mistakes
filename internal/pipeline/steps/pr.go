@@ -160,9 +160,6 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			if err != nil {
 				return nil, err
 			}
-			// The author text around the appendix is kept verbatim, so only
-			// requested references it does not already close are added.
-			appendix = appendIssuesSection(appendix, issuesSection(sctx, ownedAuthorText(live.Body, emptyNarrative)))
 			if err := retargetExistingPRIfNeeded(sctx, host, existing, runPRBaseBranch(sctx)); err != nil {
 				return nil, err
 			}

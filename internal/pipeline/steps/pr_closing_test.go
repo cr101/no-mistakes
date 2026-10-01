@@ -1,12 +1,15 @@
 package steps
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
 // A full-body update without --closes must still carry an author's
@@ -95,6 +98,66 @@ func TestPRTemplate_ClosesRendersOnceAcrossCreateAndAuthorEditedUpdate(t *testin
 	}
 	if strings.Count(updated, "Closes owner/repo#5") != 1 {
 		t.Fatalf("requested reference dropped on update:\n%s", updated)
+	}
+}
+
+// A later run on the same branch carries no --closes of its own, but its
+// owned update replaces the appendix that rendered the earlier reference; the
+// reference must survive exactly once instead of being silently unlinked.
+func TestPRTemplate_LaterRunWithoutClosesKeepsAppendixReference(t *testing.T) {
+	t.Parallel()
+	sctx, _, _ := templateTestContext(t)
+	if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, []string{"95"}); err != nil {
+		t.Fatal(err)
+	}
+	env, _ := fakeGH(t, "")
+	bodyFile := filepath.Join(t.TempDir(), "body.md")
+	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile)
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if body := readPRBodyFile(t, bodyFile); strings.Count(body, "Closes #95") != 1 {
+		t.Fatalf("created body should close #95 once:\n%s", body)
+	}
+
+	next, _, _ := templateTestContext(t)
+	env, _ = fakeGH(t, "https://github.com/test/repo/pull/99")
+	next.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile)
+	if _, err := (&PRStep{}).Execute(next); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	updated := readPRBodyFile(t, bodyFile)
+	parts, err := parsePROwnedBody(updated)
+	if err != nil {
+		t.Fatalf("updated body ownership: %v\n%s", err, updated)
+	}
+	if strings.Count(updated, "Closes #95") != 1 || !strings.Contains(parts.appendix, "Closes #95") {
+		t.Fatalf("later run dropped or repeated the closing reference:\n%s", updated)
+	}
+}
+
+// The Issues section is derived from the author text actually being written:
+// an author removing their own closing line between reads gets the requested
+// reference back in the appendix instead of a body that closes nothing.
+func TestPROwnershipUpdateRecomputesIssuesFromLatestAuthorText(t *testing.T) {
+	t.Parallel()
+	_, appendix := ownedFixture(t)
+	content, err := composeOwnedPRContent(prOwnedBody{before: "## Summary\n\nFixes #95"}, "", appendix, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := &ownershipRaceHost{body: content.Body, read: func(h *ownershipRaceHost) error {
+		if h.reads == 1 {
+			h.body = strings.Replace(h.body, "Fixes #95", "No longer closing here.", 1)
+		}
+		return nil
+	}}
+	sctx := &pipeline.StepContext{Ctx: context.Background(), ClosingIssueRefs: []string{"95"}}
+	if err := updateOwnedPR(sctx, host, &scm.PR{Number: "42"}, scm.PRContent(content), "", "", appendix, 0); err != nil {
+		t.Fatal(err)
+	}
+	if host.writes != 1 || strings.Contains(host.body, "Fixes #95") || strings.Count(host.body, "Closes #95") != 1 {
+		t.Fatalf("written body must close #95 once after the author's edit: writes=%d\n%s", host.writes, host.body)
 	}
 }
 
