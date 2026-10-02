@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -56,73 +57,102 @@ func TestPRStep_NeverInfersClosingReferenceFromIntent(t *testing.T) {
 	}
 }
 
-// A closing line a previous run published inside its Intent section is not an
-// author line: a later run with a different intent must not carry it over.
+// The pipeline publishes the intent's closing reference neutralized, so it
+// closes nothing, and a later run with a different intent and no --closes
+// has no live line to carry over.
 func TestPRStep_NeverCarriesOverClosingLineFromPublishedIntent(t *testing.T) {
 	t.Parallel()
-	for _, intent := range []string{"Refactor X\nFixes #12", "## Goal\nRefactor X\nFixes #12"} {
-		t.Run(intent, func(t *testing.T) {
-			t.Parallel()
-			dir, baseSHA, headSHA := setupGitRepo(t)
-			env, _ := fakeGH(t, "")
-			bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
-			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
-			sctx.Env = env
-			sctx.UserIntent = intent
-			if _, err := (&PRStep{}).Execute(sctx); err != nil {
-				t.Fatalf("run 1: %v", err)
-			}
-			first := readPRBodyFile(t, bodyFile)
-			if got := strings.Join(extractClosingKeywordLines(first), "|"); got != "Fixes #12" {
-				t.Fatalf("run 1 must publish the intent's standalone Fixes #12, got %q:\n%s", got, first)
-			}
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "")
+	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.UserIntent = "Refactor X\nFixes #12"
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	first := readPRBodyFile(t, bodyFile)
+	if !strings.Contains(first, "Fixes `#12`") || len(extractClosingKeywordLines(first)) != 0 {
+		t.Fatalf("run 1 must publish the intent's Fixes #12 neutralized:\n%s", first)
+	}
 
-			dir, baseSHA, headSHA = setupGitRepo(t)
-			env, _ = fakeGH(t, "https://github.com/test/repo/pull/99")
-			bodyFile = envEntry(env, "FAKE_CLI_PR_BODY_FILE")
-			if err := os.WriteFile(bodyFile, []byte(first), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			sctx = newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
-			sctx.Env = env
-			sctx.UserIntent = "Refactor Y"
-			if _, err := (&PRStep{}).Execute(sctx); err != nil {
-				t.Fatalf("run 2: %v", err)
-			}
-			body := readPRBodyFile(t, bodyFile)
-			if !strings.Contains(body, "Refactor Y") {
-				t.Fatalf("run 2 did not replace the body:\n%s", body)
-			}
-			if strings.Contains(body, "## Issues") || len(extractClosingKeywordLines(body)) != 0 {
-				t.Fatalf("closing line carried over from the published intent:\n%s", body)
-			}
-		})
+	dir, baseSHA, headSHA = setupGitRepo(t)
+	env, _ = fakeGH(t, "https://github.com/test/repo/pull/99")
+	bodyFile = envEntry(env, "FAKE_CLI_PR_BODY_FILE")
+	if err := os.WriteFile(bodyFile, []byte(first), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sctx = newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.UserIntent = "Refactor Y"
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	body := readPRBodyFile(t, bodyFile)
+	if !strings.Contains(body, "Refactor Y") {
+		t.Fatalf("run 2 did not replace the body:\n%s", body)
+	}
+	if strings.Contains(body, "## Issues") || strings.Contains(body, "#12") {
+		t.Fatalf("closing reference carried over from the published intent:\n%s", body)
 	}
 }
 
-// Closing lines under a nested heading inside a generated section are never
-// carried over, while an author's line under any other level-2 heading is,
-// even after a generated section.
-func TestAuthorClosingKeywordLinesSkipEvidenceAfterNestedHeading(t *testing.T) {
+// An author's standalone closing line is carried over whichever section it
+// sits under, including one the pipeline generates.
+func TestPRStep_PreservesAuthorClosingLineUnderGeneratedHeading(t *testing.T) {
 	t.Parallel()
-	body := strings.Join([]string{
-		"## Intent", "", "### Goal", "Fixes #12", "",
-		"## What Changed", "", "- refactor", "Fixes #3", "",
-		"## Testing", "", "### Quoted PR body", "Closes #95", "",
-		"## Pipeline", "", "## Notes", "Resolves #8", "",
-		"## Issues", "", "Closes #7",
-	}, "\n")
-	if got := strings.Join(authorClosingKeywordLines(body), "|"); got != "Fixes #3|Resolves #8|Closes #7" {
-		t.Fatalf("author closing lines = %q, want every line outside generated sections", got)
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "https://github.com/test/repo/pull/99")
+	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
+	live := "## What Changed\n\n- refactor\n\n## Testing\n\nFixes #42\n"
+	if err := os.WriteFile(bodyFile, []byte(live), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	body := readPRBodyFile(t, bodyFile)
+	if strings.Count(body, "Fixes #42") != 1 || !strings.Contains(body, "## Issues\n\nFixes #42") {
+		t.Fatalf("author closing line under ## Testing not preserved exactly once:\n%s", body)
 	}
 }
 
-func TestDemoteTopLevelHeadingsNestsIntentHeadings(t *testing.T) {
+// A closing reference in the agent-drafted narrative is published
+// neutralized: closure comes only from --closes and author lines.
+func TestPRStep_NeutralizesClosingReferenceInDraftedNarrative(t *testing.T) {
 	t.Parallel()
-	in := "# Title\n## Goal\n### Kept\n#5 is not a heading\n```\n## in code\n```\ntext"
-	want := "### Title\n### Goal\n### Kept\n#5 is not a heading\n```\n## in code\n```\ntext"
-	if got := demoteTopLevelHeadings(in); got != want {
-		t.Fatalf("demoteTopLevelHeadings = %q, want %q", got, want)
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "")
+	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
+	ag := &mockAgent{name: "test", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		payload := json.RawMessage(`{"title":"add widget","body":"## What Changed\n\n- add widget\n\nCloses #7"}`)
+		return &agent.Result{Output: payload}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	body := readPRBodyFile(t, bodyFile)
+	if !strings.Contains(body, "Closes `#7`") || strings.Contains(body, "## Issues") || len(extractClosingKeywordLines(body)) != 0 {
+		t.Fatalf("drafted closing reference not neutralized:\n%s", body)
+	}
+}
+
+func TestNeutralizeClosingReferences(t *testing.T) {
+	t.Parallel()
+	in := "Fixes #12 and resolved: owner/repo#3\n- closes #4.\nsee #5, fixes `#6`, `Fixes #7`\n```\nCloses #8\n```\n    Fixes #9"
+	want := "Fixes `#12` and resolved: `owner/repo#3`\n- closes `#4`.\nsee #5, fixes `#6`, `Fixes #7`\n```\nCloses #8\n```\n    Fixes #9"
+	got := neutralizeClosingReferences(in)
+	if got != want {
+		t.Fatalf("neutralizeClosingReferences = %q, want %q", got, want)
+	}
+	if again := neutralizeClosingReferences(got); again != got {
+		t.Fatalf("neutralizeClosingReferences is not idempotent: %q", again)
 	}
 }
 

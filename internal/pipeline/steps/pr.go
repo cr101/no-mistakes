@@ -175,7 +175,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		} else {
 			// This update replaces the whole body. Carry the author's standalone
 			// closing lines over so it never silently unlinks an issue.
-			sctx.PreservedClosingLines = authorClosingKeywordLines(live.Body)
+			sctx.PreservedClosingLines = extractClosingKeywordLines(live.Body)
 			content, err := s.buildPRContent(sctx, branch, baseBranch, baseSHA, provider, bodyLimit)
 			if err != nil {
 				return nil, err
@@ -445,8 +445,9 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 		if err != nil {
 			return prContent{}, err
 		}
-		appendix = appendIssuesSection(appendix, issuesSection(sctx, content.Body))
-		return composeOwnedPRContent(prOwnedBody{before: neutralizeAttestationMarkers(content.Body)}, content.Title, appendix, bodyLimit)
+		narrative := neutralizeAttestationMarkers(content.Body)
+		appendix = appendIssuesSection(appendix, issuesSection(sctx, narrative))
+		return composeOwnedPRContent(prOwnedBody{before: narrative}, content.Title, appendix, bodyLimit)
 	}
 	content, err := s.draftPRContent(sctx, branch, baseBranch, baseSHA, provider, bodyLimit)
 	if err != nil {

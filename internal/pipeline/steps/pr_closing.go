@@ -18,8 +18,7 @@ import (
 //   - explicit `axi run --closes` values, persisted on the run and claimed
 //     once by the PR step (sctx.ClosingIssueRefs);
 //   - standalone closing-keyword lines already in a live PR body that an
-//     ordinary (unowned) update is about to replace (outside its
-//     pipeline-generated sections), or in the Issues section
+//     ordinary (unowned) update is about to replace, or in the Issues section
 //     of an owned body's appendix that an owned update is about to replace
 //     (sctx.PreservedClosingLines).
 //
@@ -27,7 +26,8 @@ import (
 // (pr.template) body keeps its author text verbatim, so only the explicit
 // references the author text does not already close are added to its
 // generated appendix. Closure is never inferred from intent, commits, or
-// branch names.
+// branch names: pipeline-generated text is published with its closing
+// references neutralized (neutralizeClosingReferences).
 
 const issuesSectionHeading = "## Issues"
 
@@ -45,26 +45,9 @@ var closingReferencePattern = regexp.MustCompile(`(?i)(?:[A-Za-z0-9-]+/[A-Za-z0-
 // extractClosingKeywordLines returns the distinct standalone closing-keyword
 // lines of body, outside fenced and indented code blocks.
 func extractClosingKeywordLines(body string) []string {
-	return closingKeywordLines(body, false)
-}
-
-// authorClosingKeywordLines is extractClosingKeywordLines for an ordinary
-// live body whose closing lines an update carries over: lines inside the
-// pipeline-generated Intent, Risk Assessment, Testing, and Pipeline sections
-// are skipped, so closure is never inferred from published intent or
-// evidence. A generated section ends at the next level-2 heading that is not
-// itself generated (publicPRIntent demotes the intent's own headings, so
-// published intent cannot end its section early). The Issues section and
-// everything else count as author lines.
-func authorClosingKeywordLines(body string) []string {
-	return closingKeywordLines(body, true)
-}
-
-func closingKeywordLines(body string, skipGenerated bool) []string {
 	seen := map[string]struct{}{}
 	var lines []string
 	var fence markdownFence
-	generated := false
 	for _, raw := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
 		inFence := fence.marker != 0
 		fence.consume(raw)
@@ -72,10 +55,7 @@ func closingKeywordLines(body string, skipGenerated bool) []string {
 			continue
 		}
 		line := strings.TrimSpace(raw)
-		if skipGenerated && strings.HasPrefix(line, "## ") {
-			generated = isGeneratedSectionHeading(line) && !strings.EqualFold(line, issuesSectionHeading)
-		}
-		if generated || !closingKeywordLinePattern.MatchString(line) {
+		if !closingKeywordLinePattern.MatchString(line) {
 			continue
 		}
 		key := strings.ToLower(line)
@@ -86,6 +66,75 @@ func closingKeywordLines(body string, skipGenerated bool) []string {
 		lines = append(lines, line)
 	}
 	return lines
+}
+
+var closingReferenceInTextPattern = regexp.MustCompile(`(?i)\b((?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved):?\s+)((?:[A-Za-z0-9-]+/[A-Za-z0-9._-]+)?#[1-9][0-9]*)\b`)
+
+// neutralizeClosingReferences puts every closing-keyword reference in
+// pipeline-generated PR text in an inline code span ("Fixes `#12`"), outside
+// fenced, indented, and inline code. GitHub ignores a reference in code, so
+// nothing the pipeline publishes can close an issue or be carried over by a
+// later update as an author line; only the Issues section carries live ones.
+func neutralizeClosingReferences(s string) string {
+	if !closingReferenceInTextPattern.MatchString(s) {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	var fence markdownFence
+	for i, raw := range lines {
+		inFence := fence.marker != 0
+		fence.consume(raw)
+		if inFence || fence.marker != 0 || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
+			continue
+		}
+		lines[i] = outsideInlineCode(raw, func(text string) string {
+			return closingReferenceInTextPattern.ReplaceAllString(text, "${1}`${2}`")
+		})
+	}
+	return strings.Join(lines, "\n")
+}
+
+// outsideInlineCode applies rewrite to the parts of line outside inline code
+// spans. A backtick run without a matching closing run is literal text.
+func outsideInlineCode(line string, rewrite func(string) string) string {
+	var b strings.Builder
+	text := 0
+	for i := 0; i < len(line); {
+		if line[i] != '`' {
+			i++
+			continue
+		}
+		n := 1
+		for i+n < len(line) && line[i+n] == '`' {
+			n++
+		}
+		closing := -1
+		for j := i + n; j < len(line); {
+			if line[j] != '`' {
+				j++
+				continue
+			}
+			m := 1
+			for j+m < len(line) && line[j+m] == '`' {
+				m++
+			}
+			if m == n {
+				closing = j
+				break
+			}
+			j += m
+		}
+		if closing < 0 {
+			i += n
+			continue
+		}
+		b.WriteString(rewrite(line[text:i]))
+		b.WriteString(line[i : closing+n])
+		i = closing + n
+		text = i
+	}
+	b.WriteString(rewrite(line[text:]))
+	return b.String()
 }
 
 // closingTargets returns the canonical refs ("42", "owner/repo#42") closed
@@ -216,7 +265,7 @@ func refuseSkipWithClosingIssues(sctx *pipeline.StepContext, reason string) erro
 // dropped rather than written back. sctx.PreservedClosingLines is replaced
 // with the latest extract and body's trailing Issues section is re-rendered.
 func carryOverLatestClosingLines(sctx *pipeline.StepContext, body, latestBody string, bodyLimit int) (string, error) {
-	latest := authorClosingKeywordLines(latestBody)
+	latest := extractClosingKeywordLines(latestBody)
 	if sameClosingLines(sctx.PreservedClosingLines, latest) {
 		return body, nil
 	}
