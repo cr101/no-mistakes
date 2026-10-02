@@ -488,7 +488,9 @@ func TestPRStep_ClosesFailsWhenCreateReturnsNoVerifiableIdentity(t *testing.T) {
 	}
 }
 
-func TestPRStep_PreservesAuthorClosingLinesAndAddsMissingRequestedIssues(t *testing.T) {
+// An ordinary update regenerates the whole body; the requested references
+// render in the Issues section exactly once each.
+func TestPRStep_OrdinaryUpdateRendersRequestedIssuesOnce(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	env, _ := fakeGH(t, "https://github.com/test/repo/pull/99")
@@ -512,13 +514,13 @@ func TestPRStep_PreservesAuthorClosingLinesAndAddsMissingRequestedIssues(t *test
 		t.Fatal(err)
 	}
 	body := string(updated)
-	for _, line := range []string{"Closes owner/repo#7", "Fixes #42", "Closes #99"} {
+	for _, line := range []string{"Closes owner/repo#7", "Closes #42", "Closes #99"} {
 		if strings.Count(body, line) != 1 {
 			t.Fatalf("updated body should contain %q exactly once:\n%s", line, body)
 		}
 	}
-	if !strings.Contains(body, "## Issues") {
-		t.Fatalf("updated body has no stable Issues section:\n%s", body)
+	if strings.Contains(body, "Fixes #42") || !strings.Contains(body, "## Issues") {
+		t.Fatalf("updated body must be regenerated with a stable Issues section:\n%s", body)
 	}
 }
 
@@ -555,8 +557,8 @@ func TestIssuesSectionSkipsReferencesTheAuthorTextAlreadyCloses(t *testing.T) {
 	}
 }
 
-// Without --closes and without author closing lines, nothing is added or
-// inferred, even when the intent names an issue.
+// Without --closes nothing is added or inferred, even when the intent names
+// an issue.
 func TestIssuesSectionNeverInfersClosure(t *testing.T) {
 	sctx := &pipeline.StepContext{UserIntent: "Implement issue #95"}
 	if got := issuesSection(sctx, "Implement issue #95"); got != "" {
@@ -570,14 +572,6 @@ func TestVerifyClosingIssuesFailsWhenLiveBodyDroppedARequestedReference(t *testi
 	err := verifyClosingIssues(context.Background(), host, &scm.PR{Number: "1"}, sctx)
 	if err == nil || !strings.Contains(err.Error(), "owner/repo#3") {
 		t.Fatalf("verifyClosingIssues() error = %v", err)
-	}
-}
-
-func TestVerifyClosingIssuesFailsWhenComposedBodyDropsPreservedLine(t *testing.T) {
-	sctx := &pipeline.StepContext{PreservedClosingLines: []string{"Fixes #7"}}
-	err := verifyClosingIssuesInBody("## What Changed\n\n- updated", sctx)
-	if err == nil || !strings.Contains(err.Error(), "Fixes #7") {
-		t.Fatalf("verifyClosingIssuesInBody() error = %v, want preserved-line failure", err)
 	}
 }
 

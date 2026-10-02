@@ -216,11 +216,7 @@ func TestClosingIssueRefsGitHubJourney(t *testing.T) {
 		t.Errorf("closing lines not in deterministic order; body:\n%s", body)
 	}
 
-	// Scenario (#763): the author adds a standalone closing line on the forge;
-	// a rerun (after a daemon restart) inherits refs, adds one, and keeps it.
-	state := readStatefulGH(t, statePath)
-	state.PRs[branch].Body += "\n\nFixes other/thing#3\n"
-	writeStatefulGH(t, statePath, state)
+	// Scenario: a rerun (after a daemon restart) inherits refs and adds one.
 	if out, err := h.Run("daemon", "restart"); err != nil {
 		t.Fatalf("daemon restart: %v\n%s", err, out)
 	}
@@ -237,10 +233,10 @@ func TestClosingIssueRefsGitHubJourney(t *testing.T) {
 	}
 	body = livePRBody(t, statePath, branch)
 	saveEvidence(t, "03-rerun-pr-body.md", body)
-	assertLinesOnce(t, "rerun", body, "Closes #12", "Closes #95", "Closes #200", "Closes owner/repo#7", "Fixes other/thing#3")
+	assertLinesOnce(t, "rerun", body, "Closes #12", "Closes #95", "Closes #200", "Closes owner/repo#7")
 
-	// Scenario: a plain gate push (a new run with no --closes) refreshes the
-	// body and still carries every closing line over from the live body.
+	// Scenario: a plain gate push (a new run with no --closes) regenerates the
+	// body without closing references.
 	h.Checkout("main")
 	h.RemoveWorktree(wt)
 	h.CommitChange(branch, "closes.txt", "closes v2\n", "update closes fixture")
@@ -254,7 +250,11 @@ func TestClosingIssueRefsGitHubJourney(t *testing.T) {
 	}
 	body = livePRBody(t, statePath, branch)
 	saveEvidence(t, "04-plain-push-pr-body.md", body)
-	assertLinesOnce(t, "plain push", body, "Closes #12", "Closes #95", "Closes #200", "Closes owner/repo#7", "Fixes other/thing#3")
+	for _, keyword := range []string{"## Issues", "Closes #"} {
+		if strings.Contains(body, keyword) {
+			t.Errorf("plain push body contains %q; body:\n%s", keyword, body)
+		}
+	}
 
 	// Scenario: a gate push option carries a reference on the non-AXI path.
 	const optBranch = "feature/closes-push-option"
@@ -403,9 +403,8 @@ func TestClosingIssueRefsNonGitHubFailsAtPR(t *testing.T) {
 }
 
 // TestClosingIssueRefsOwnedTemplateJourney drives the author-preserving
-// pr.template path: a later run without --closes keeps the appendix's
-// closing line, and author text that already closes the issue is not
-// duplicated by the generated appendix.
+// pr.template path: the appendix renders the requested reference, and author
+// text that already closes the issue is not duplicated by the appendix.
 func TestClosingIssueRefsOwnedTemplateJourney(t *testing.T) {
 	h := NewHarness(t, SetupOpts{Agent: "claude"})
 	statePath := setupStatefulGitHub(t, h)
@@ -431,25 +430,16 @@ func TestClosingIssueRefsOwnedTemplateJourney(t *testing.T) {
 	}
 	assertLinesOnce(t, "template create", body, "Closes #95")
 
-	// review-1: a plain push (new run, no --closes) must keep the appendix's
-	// closing line instead of regenerating an appendix without it.
-	h.Checkout("main")
-	h.RemoveWorktree(wt)
-	h.CommitChange(branch, "t.txt", "t v2\n", "update template fixture")
-	h.PushToGate(branch)
-	pushed := waitPublished(t, h, branch, created.ID, "template plain push")
-	body = livePRBody(t, statePath, branch)
-	saveEvidence(t, "12-template-plain-push-pr-body.md", body)
-	assertLinesOnce(t, "template plain push", body, "Closes #95")
-
-	// Author text that already closes the issue: the appendix must not add a
-	// second closing reference for it, and the author's line stays verbatim.
+	// Author text that already closes the issue: a rerun (which inherits
+	// --closes 95) must not add a second closing reference for it in the
+	// appendix, and the author's line stays verbatim.
 	state := readStatefulGH(t, statePath)
 	state.PRs[branch].Body = "Fixes #95\n\n" + state.PRs[branch].Body
 	writeStatefulGH(t, statePath, state)
-	h.CommitChange(branch, "t.txt", "t v3\n", "update template fixture again")
-	h.PushToGate(branch)
-	waitPublished(t, h, branch, pushed.ID, "template author closes")
+	if out, err := h.RunInDir(wt, "rerun"); err != nil || !strings.Contains(out, "Rerun started") {
+		t.Fatalf("rerun: %v\n%s", err, out)
+	}
+	waitPublished(t, h, branch, created.ID, "template author closes")
 	body = livePRBody(t, statePath, branch)
 	saveEvidence(t, "13-template-author-fixes-pr-body.md", body)
 	if got := exactLineCount(body, "Fixes #95"); got != 1 {

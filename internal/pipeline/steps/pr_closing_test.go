@@ -2,43 +2,19 @@ package steps
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
-// A full-body update without --closes must still carry an author's
-// standalone closing line over; dropping it silently unlinks the issue.
-func TestPRStep_PreservesAuthorClosingLineWithoutCloses(t *testing.T) {
-	t.Parallel()
-	dir, baseSHA, headSHA := setupGitRepo(t)
-	env, _ := fakeGH(t, "https://github.com/test/repo/pull/99")
-	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
-	if err := os.WriteFile(bodyFile, []byte("## Summary\n\nCloses owner/repo#7\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Env = env
-
-	if _, err := (&PRStep{}).Execute(sctx); err != nil {
-		t.Fatal(err)
-	}
-	body := readPRBodyFile(t, bodyFile)
-	if strings.Count(body, "Closes owner/repo#7") != 1 || !strings.Contains(body, "## Issues") {
-		t.Fatalf("author closing line not preserved exactly once:\n%s", body)
-	}
-}
-
-// Without --closes and without author closing lines, the body never gains a
-// closing reference, even though the intent names an issue.
+// Without --closes the body never gains a closing reference, even though
+// the intent names an issue.
 func TestPRStep_NeverInfersClosingReferenceFromIntent(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -54,105 +30,6 @@ func TestPRStep_NeverInfersClosingReferenceFromIntent(t *testing.T) {
 	body := readPRBodyFile(t, bodyFile)
 	if strings.Contains(body, "## Issues") || len(extractClosingKeywordLines(body)) != 0 {
 		t.Fatalf("closing reference inferred without --closes:\n%s", body)
-	}
-}
-
-// The pipeline publishes the intent's closing reference neutralized, so it
-// closes nothing, and a later run with a different intent and no --closes
-// has no live line to carry over.
-func TestPRStep_NeverCarriesOverClosingLineFromPublishedIntent(t *testing.T) {
-	t.Parallel()
-	dir, baseSHA, headSHA := setupGitRepo(t)
-	env, _ := fakeGH(t, "")
-	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
-	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Env = env
-	sctx.UserIntent = "Refactor X\nFixes #12"
-	if _, err := (&PRStep{}).Execute(sctx); err != nil {
-		t.Fatalf("run 1: %v", err)
-	}
-	first := readPRBodyFile(t, bodyFile)
-	if !strings.Contains(first, "Fixes `#12`") || len(extractClosingKeywordLines(first)) != 0 {
-		t.Fatalf("run 1 must publish the intent's Fixes #12 neutralized:\n%s", first)
-	}
-
-	dir, baseSHA, headSHA = setupGitRepo(t)
-	env, _ = fakeGH(t, "https://github.com/test/repo/pull/99")
-	bodyFile = envEntry(env, "FAKE_CLI_PR_BODY_FILE")
-	if err := os.WriteFile(bodyFile, []byte(first), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	sctx = newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Env = env
-	sctx.UserIntent = "Refactor Y"
-	if _, err := (&PRStep{}).Execute(sctx); err != nil {
-		t.Fatalf("run 2: %v", err)
-	}
-	body := readPRBodyFile(t, bodyFile)
-	if !strings.Contains(body, "Refactor Y") {
-		t.Fatalf("run 2 did not replace the body:\n%s", body)
-	}
-	if strings.Contains(body, "## Issues") || strings.Contains(body, "#12") {
-		t.Fatalf("closing reference carried over from the published intent:\n%s", body)
-	}
-}
-
-// An author's standalone closing line is carried over whichever section it
-// sits under, including one the pipeline generates.
-func TestPRStep_PreservesAuthorClosingLineUnderGeneratedHeading(t *testing.T) {
-	t.Parallel()
-	dir, baseSHA, headSHA := setupGitRepo(t)
-	env, _ := fakeGH(t, "https://github.com/test/repo/pull/99")
-	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
-	live := "## What Changed\n\n- refactor\n\n## Testing\n\nFixes #42\n"
-	if err := os.WriteFile(bodyFile, []byte(live), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Env = env
-
-	if _, err := (&PRStep{}).Execute(sctx); err != nil {
-		t.Fatal(err)
-	}
-	body := readPRBodyFile(t, bodyFile)
-	if strings.Count(body, "Fixes #42") != 1 || !strings.Contains(body, "## Issues\n\nFixes #42") {
-		t.Fatalf("author closing line under ## Testing not preserved exactly once:\n%s", body)
-	}
-}
-
-// A closing reference in the agent-drafted narrative is published
-// neutralized: closure comes only from --closes and author lines.
-func TestPRStep_NeutralizesClosingReferenceInDraftedNarrative(t *testing.T) {
-	t.Parallel()
-	dir, baseSHA, headSHA := setupGitRepo(t)
-	env, _ := fakeGH(t, "")
-	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
-	ag := &mockAgent{name: "test", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-		payload := json.RawMessage(`{"title":"add widget","body":"## What Changed\n\n- add widget\n\nCloses #7"}`)
-		return &agent.Result{Output: payload}, nil
-	}}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Env = env
-
-	if _, err := (&PRStep{}).Execute(sctx); err != nil {
-		t.Fatal(err)
-	}
-	body := readPRBodyFile(t, bodyFile)
-	if !strings.Contains(body, "Closes `#7`") || strings.Contains(body, "## Issues") || len(extractClosingKeywordLines(body)) != 0 {
-		t.Fatalf("drafted closing reference not neutralized:\n%s", body)
-	}
-}
-
-func TestNeutralizeClosingReferences(t *testing.T) {
-	t.Parallel()
-	in := "Fixes #12 and resolved: owner/repo#3\n- closes #4.\nsee #5, fixes `#6`, `Fixes #7`\n```\nCloses #8\n```\n    Fixes #9"
-	want := "Fixes `#12` and resolved: `owner/repo#3`\n- closes `#4`.\nsee #5, fixes `#6`, `Fixes #7`\n```\nCloses #8\n```\n    Fixes #9"
-	got := neutralizeClosingReferences(in)
-	if got != want {
-		t.Fatalf("neutralizeClosingReferences = %q, want %q", got, want)
-	}
-	if again := neutralizeClosingReferences(got); again != got {
-		t.Fatalf("neutralizeClosingReferences is not idempotent: %q", again)
 	}
 }
 
@@ -203,41 +80,6 @@ func TestPRTemplate_ClosesRendersOnceAcrossCreateAndAuthorEditedUpdate(t *testin
 	}
 }
 
-// A later run on the same branch carries no --closes of its own, but its
-// owned update replaces the appendix that rendered the earlier reference; the
-// reference must survive exactly once instead of being silently unlinked.
-func TestPRTemplate_LaterRunWithoutClosesKeepsAppendixReference(t *testing.T) {
-	t.Parallel()
-	sctx, _, _ := templateTestContext(t)
-	if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, []string{"95"}); err != nil {
-		t.Fatal(err)
-	}
-	env, _ := fakeGH(t, "")
-	bodyFile := filepath.Join(t.TempDir(), "body.md")
-	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile)
-	if _, err := (&PRStep{}).Execute(sctx); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	if body := readPRBodyFile(t, bodyFile); strings.Count(body, "Closes #95") != 1 {
-		t.Fatalf("created body should close #95 once:\n%s", body)
-	}
-
-	next, _, _ := templateTestContext(t)
-	env, _ = fakeGH(t, "https://github.com/test/repo/pull/99")
-	next.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile)
-	if _, err := (&PRStep{}).Execute(next); err != nil {
-		t.Fatalf("update: %v", err)
-	}
-	updated := readPRBodyFile(t, bodyFile)
-	parts, err := parsePROwnedBody(updated)
-	if err != nil {
-		t.Fatalf("updated body ownership: %v\n%s", err, updated)
-	}
-	if strings.Count(updated, "Closes #95") != 1 || !strings.Contains(parts.appendix, "Closes #95") {
-		t.Fatalf("later run dropped or repeated the closing reference:\n%s", updated)
-	}
-}
-
 // The Issues section is derived from the author text actually being written:
 // an author removing their own closing line between reads gets the requested
 // reference back in the appendix instead of a body that closes nothing.
@@ -270,72 +112,6 @@ func readPRBodyFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(data)
-}
-
-// An author can add a closing line while the update is drafting. The
-// full-body write must carry it over from the re-read rather than erase it.
-func TestPRStep_CarriesOverClosingLineAddedDuringDrafting(t *testing.T) {
-	t.Parallel()
-	dir, baseSHA, headSHA := setupGitRepo(t)
-	env, _ := fakeGH(t, "https://github.com/test/repo/pull/99")
-	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
-	if err := os.WriteFile(bodyFile, []byte("## Summary\n\nFixes #42\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-		if err := os.WriteFile(bodyFile, []byte("## Summary\n\nFixes #42\nFixes #4.\n"), 0o644); err != nil {
-			return nil, err
-		}
-		return &agent.Result{}, nil
-	}}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Env = env
-
-	if _, err := (&PRStep{}).Execute(sctx); err != nil {
-		t.Fatal(err)
-	}
-	if len(ag.calls) == 0 {
-		t.Fatal("the author edit must land while the update is drafting")
-	}
-	lines := extractClosingKeywordLines(readPRBodyFile(t, bodyFile))
-	if got := strings.Join(lines, "|"); got != "Fixes #42|Fixes #4." {
-		t.Fatalf("closing lines = %q, want both author lines exactly once", got)
-	}
-}
-
-// The pre-write re-read is authoritative both ways: a closing line the author
-// removed while the update was drafting must not be written back, or the PR
-// would close an issue the author no longer means to close.
-func TestPRStep_DropsClosingLineRemovedDuringDrafting(t *testing.T) {
-	t.Parallel()
-	dir, baseSHA, headSHA := setupGitRepo(t)
-	env, _ := fakeGH(t, "https://github.com/test/repo/pull/99")
-	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
-	if err := os.WriteFile(bodyFile, []byte("## Summary\n\nFixes #42\nCloses #7\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-		if err := os.WriteFile(bodyFile, []byte("## Summary\n\nCloses #7\n"), 0o644); err != nil {
-			return nil, err
-		}
-		return &agent.Result{}, nil
-	}}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Env = env
-	if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, []string{"95"}); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := (&PRStep{}).Execute(sctx); err != nil {
-		t.Fatal(err)
-	}
-	if len(ag.calls) == 0 {
-		t.Fatal("the author edit must land while the update is drafting")
-	}
-	body := readPRBodyFile(t, bodyFile)
-	if got := strings.Join(extractClosingKeywordLines(body), "|"); got != "Closes #7|Closes #95" {
-		t.Fatalf("closing lines = %q, want the removed Fixes #42 gone and the rest once:\n%s", got, body)
-	}
 }
 
 // A run carrying --closes must not skip publication because the PR host is
@@ -381,22 +157,19 @@ func TestPRStep_ClosesFailsInsteadOfSkippingWhenHostUnavailable(t *testing.T) {
 }
 
 // Trailing punctuation and ordered-list items are ordinary ways to write a
-// standalone closing line; both extraction and verification must see them.
+// standalone closing line; verification must see them.
 func TestClosingKeywordLinesAcceptPunctuationAndOrderedLists(t *testing.T) {
 	body := "Fixes #4.\n1. Closes #5\n2) Resolves owner/repo#6;\nThis fixes #7 partly.\n"
 	got := strings.Join(extractClosingKeywordLines(body), "|")
 	if got != "Fixes #4.|1. Closes #5|2) Resolves owner/repo#6;" {
 		t.Fatalf("extractClosingKeywordLines() = %q", got)
 	}
-	sctx := &pipeline.StepContext{
-		ClosingIssueRefs:      []string{"4", "5", "owner/repo#6"},
-		PreservedClosingLines: []string{"Fixes #4.", "1. Closes #5"},
-	}
+	sctx := &pipeline.StepContext{ClosingIssueRefs: []string{"4", "5", "owner/repo#6"}}
 	if err := verifyClosingIssuesInBody(body, sctx); err != nil {
 		t.Fatalf("verifyClosingIssuesInBody() = %v", err)
 	}
 	if err := verifyClosingIssuesInBody("Fixes #5.\n", sctx); err == nil {
-		t.Fatal("verifyClosingIssuesInBody() accepted a body missing preserved lines")
+		t.Fatal("verifyClosingIssuesInBody() accepted a body missing requested references")
 	}
 }
 

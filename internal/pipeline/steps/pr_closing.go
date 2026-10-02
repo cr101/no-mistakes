@@ -12,22 +12,13 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/scm/github"
 )
 
-// Closing references in a PR body come from exactly two places, and nothing
-// else may add one:
-//
-//   - explicit `axi run --closes` values, persisted on the run and claimed
-//     once by the PR step (sctx.ClosingIssueRefs);
-//   - standalone closing-keyword lines already in a live PR body that an
-//     ordinary (unowned) update is about to replace, or in the Issues section
-//     of an owned body's appendix that an owned update is about to replace
-//     (sctx.PreservedClosingLines).
-//
-// Both render in one stable `## Issues` section. An author-preserving
-// (pr.template) body keeps its author text verbatim, so only the explicit
-// references the author text does not already close are added to its
-// generated appendix. Closure is never inferred from intent, commits, or
-// branch names: pipeline-generated text is published with its closing
-// references neutralized (neutralizeClosingReferences).
+// The pipeline adds closing references to a PR body from exactly one place:
+// explicit `axi run --closes` values, persisted on the run and claimed once by
+// the PR step (sctx.ClosingIssueRefs). They render in one stable `## Issues`
+// section. An author-preserving (pr.template) body keeps its author text
+// verbatim, so only the references the author text does not already close
+// are added to its generated appendix. Closure is never inferred from intent,
+// commits, or branch names.
 
 const issuesSectionHeading = "## Issues"
 
@@ -35,9 +26,9 @@ const closingKeywordPattern = `(?:close|closes|closed|fix|fixes|fixed|resolve|re
 
 // closingKeywordLinePattern matches a line that consists only of GitHub
 // closing keywords and their targets, optionally as a bullet or ordered list
-// item and with trailing sentence punctuation. A reference
-// inside prose ("this fixes #4 partly") is deliberately not preserved: it is
-// not a standalone closing declaration.
+// item and with trailing sentence punctuation. A reference inside prose
+// ("this fixes #4 partly") is deliberately not counted: it is not a
+// standalone closing declaration.
 var closingKeywordLinePattern = regexp.MustCompile(`(?i)^(?:(?:[-*+]|[0-9]+[.)])\s+)?` + closingKeywordPattern + `(?:\s*,\s*` + closingKeywordPattern + `)*[.;!]?$`)
 
 var closingReferencePattern = regexp.MustCompile(`(?i)(?:[A-Za-z0-9-]+/[A-Za-z0-9._-]+#[1-9][0-9]*|#[1-9][0-9]*)`)
@@ -66,75 +57,6 @@ func extractClosingKeywordLines(body string) []string {
 		lines = append(lines, line)
 	}
 	return lines
-}
-
-var closingReferenceInTextPattern = regexp.MustCompile(`(?i)\b((?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved):?\s+)((?:[A-Za-z0-9-]+/[A-Za-z0-9._-]+)?#[1-9][0-9]*)\b`)
-
-// neutralizeClosingReferences puts every closing-keyword reference in
-// pipeline-generated PR text in an inline code span ("Fixes `#12`"), outside
-// fenced, indented, and inline code. GitHub ignores a reference in code, so
-// nothing the pipeline publishes can close an issue or be carried over by a
-// later update as an author line; only the Issues section carries live ones.
-func neutralizeClosingReferences(s string) string {
-	if !closingReferenceInTextPattern.MatchString(s) {
-		return s
-	}
-	lines := strings.Split(s, "\n")
-	var fence markdownFence
-	for i, raw := range lines {
-		inFence := fence.marker != 0
-		fence.consume(raw)
-		if inFence || fence.marker != 0 || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
-			continue
-		}
-		lines[i] = outsideInlineCode(raw, func(text string) string {
-			return closingReferenceInTextPattern.ReplaceAllString(text, "${1}`${2}`")
-		})
-	}
-	return strings.Join(lines, "\n")
-}
-
-// outsideInlineCode applies rewrite to the parts of line outside inline code
-// spans. A backtick run without a matching closing run is literal text.
-func outsideInlineCode(line string, rewrite func(string) string) string {
-	var b strings.Builder
-	text := 0
-	for i := 0; i < len(line); {
-		if line[i] != '`' {
-			i++
-			continue
-		}
-		n := 1
-		for i+n < len(line) && line[i+n] == '`' {
-			n++
-		}
-		closing := -1
-		for j := i + n; j < len(line); {
-			if line[j] != '`' {
-				j++
-				continue
-			}
-			m := 1
-			for j+m < len(line) && line[j+m] == '`' {
-				m++
-			}
-			if m == n {
-				closing = j
-				break
-			}
-			j += m
-		}
-		if closing < 0 {
-			i += n
-			continue
-		}
-		b.WriteString(rewrite(line[text:i]))
-		b.WriteString(line[i : closing+n])
-		i = closing + n
-		text = i
-	}
-	b.WriteString(rewrite(line[text:]))
-	return b.String()
 }
 
 // closingTargets returns the canonical refs ("42", "owner/repo#42") closed
@@ -173,15 +95,15 @@ func closingLine(ref string) string {
 }
 
 // issuesSection renders the stable Issues section, or "" when there is
-// nothing to render. Requested refs already closed by a preserved line or by
-// authorText (live author content kept verbatim around it) are not repeated,
-// so each reference appears exactly once.
+// nothing to render. Requested refs already closed by authorText (live author
+// content kept verbatim around it) are not repeated, so each reference
+// appears exactly once.
 func issuesSection(sctx *pipeline.StepContext, authorText string) string {
 	if sctx == nil {
 		return ""
 	}
-	lines := append([]string(nil), sctx.PreservedClosingLines...)
-	present := closingTargets(append(append([]string(nil), lines...), extractClosingKeywordLines(authorText)...), prRepository(sctx))
+	var lines []string
+	present := closingTargets(extractClosingKeywordLines(authorText), prRepository(sctx))
 	for _, ref := range sctx.ClosingIssueRefs {
 		key := strings.ToLower(ref)
 		if _, exists := present[key]; exists {
@@ -259,51 +181,12 @@ func refuseSkipWithClosingIssues(sctx *pipeline.StepContext, reason string) erro
 	return fmt.Errorf("render closing issues: --closes requires publishing a pull request, but PR creation is unavailable: %s", reason)
 }
 
-// carryOverLatestClosingLines makes the re-read live body authoritative for
-// which of the author's standalone closing lines still exist: lines added
-// since the first read are carried over, and lines the author removed are
-// dropped rather than written back. sctx.PreservedClosingLines is replaced
-// with the latest extract and body's trailing Issues section is re-rendered.
-func carryOverLatestClosingLines(sctx *pipeline.StepContext, body, latestBody string, bodyLimit int) (string, error) {
-	latest := extractClosingKeywordLines(latestBody)
-	if sameClosingLines(sctx.PreservedClosingLines, latest) {
-		return body, nil
-	}
-	previous := issuesSection(sctx, "")
-	if previous != "" {
-		if !strings.HasSuffix(body, previous) {
-			// Never guess where the section is; refuse rather than publish
-			// a closing line the author removed.
-			return "", fmt.Errorf("verify closing issues: cannot locate the Issues section to reconcile closing lines changed during drafting")
-		}
-		body = strings.TrimRight(strings.TrimSuffix(body, previous), "\n")
-	}
-	sctx.PreservedClosingLines = latest
-	body = appendIssuesSection(body, issuesSection(sctx, ""))
-	if len(body) > maxPullRequestBodyBytes || (bodyLimit > 0 && scm.PRBodyLen(body) > bodyLimit) {
-		return "", fmt.Errorf("verify closing issues: PR body exceeds provider budget after carrying over closing lines added during drafting")
-	}
-	return body, nil
-}
-
-func sameClosingLines(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if !strings.EqualFold(a[i], b[i]) {
-			return false
-		}
-	}
-	return true
-}
-
 // verifyClosingIssues re-reads the live PR body and fails unless it still
-// carries every requested reference and every preserved closing line. A
-// missing reference is invisible at review time (the issue simply stays open
-// after merge), so the step must not report success without this check.
+// carries every requested reference. A missing reference is invisible at
+// review time (the issue simply stays open after merge), so the step must not
+// report success without this check.
 func verifyClosingIssues(ctx context.Context, host scm.Host, pr *scm.PR, sctx *pipeline.StepContext) error {
-	if sctx == nil || len(sctx.ClosingIssueRefs) == 0 && len(sctx.PreservedClosingLines) == 0 {
+	if sctx == nil || len(sctx.ClosingIssueRefs) == 0 {
 		return nil
 	}
 	reader, ok := host.(scm.PRContentReader)
@@ -324,17 +207,7 @@ func verifyClosingIssuesInBody(body string, sctx *pipeline.StepContext) error {
 	if sctx == nil {
 		return nil
 	}
-	present := extractClosingKeywordLines(body)
-	presentLines := make(map[string]struct{}, len(present))
-	for _, line := range present {
-		presentLines[strings.ToLower(line)] = struct{}{}
-	}
-	for _, line := range sctx.PreservedClosingLines {
-		if _, ok := presentLines[strings.ToLower(line)]; !ok {
-			return fmt.Errorf("verify closing issues: pull request body dropped closing line %q", line)
-		}
-	}
-	targets := closingTargets(present, prRepository(sctx))
+	targets := closingTargets(extractClosingKeywordLines(body), prRepository(sctx))
 	for _, ref := range sctx.ClosingIssueRefs {
 		if _, ok := targets[strings.ToLower(ref)]; !ok {
 			return fmt.Errorf("verify closing issues: pull request body is missing %s", closingLine(ref))
@@ -365,29 +238,4 @@ func assembleDraftPRBody(sctx *pipeline.StepContext, whatChanged, riskLine, test
 		return appendIssuesSection(assemblePRBody(sctx, whatChanged, riskLine, testingMD, pipelineMD, bodyLimit-reserve, provider), section)
 	}
 	return appendIssuesSection(buildPRBodyWithin(whatChanged, riskLine, testingMD, pipelineMD, sctx, provider, maxPullRequestBodyBytes-reserve), section)
-}
-
-// ownedPreservedClosingLines returns the closing lines of the Issues section
-// an owned body's previous appendix rendered, minus those whose targets the
-// verbatim author text already closes. Replacing that appendix must not
-// silently unlink an issue a previous run's --closes added.
-func ownedPreservedClosingLines(previousAppendix, authorText, repo string) []string {
-	start := strings.LastIndex("\n"+previousAppendix, "\n"+issuesSectionHeading+"\n")
-	if start < 0 {
-		return nil
-	}
-	closed := closingTargets(extractClosingKeywordLines(authorText), repo)
-	var lines []string
-	for _, line := range extractClosingKeywordLines(previousAppendix[start:]) {
-		covered := true
-		for target := range closingTargets([]string{line}, repo) {
-			if _, ok := closed[target]; !ok {
-				covered = false
-			}
-		}
-		if !covered {
-			lines = append(lines, line)
-		}
-	}
-	return lines
 }

@@ -173,9 +173,6 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				return nil, err
 			}
 		} else {
-			// This update replaces the whole body. Carry the author's standalone
-			// closing lines over so it never silently unlinks an issue.
-			sctx.PreservedClosingLines = extractClosingKeywordLines(live.Body)
 			content, err := s.buildPRContent(sctx, branch, baseBranch, baseSHA, provider, bodyLimit)
 			if err != nil {
 				return nil, err
@@ -185,21 +182,6 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			}
 			if err := retargetExistingPRIfNeeded(sctx, host, existing, runPRBaseBranch(sctx)); err != nil {
 				return nil, err
-			}
-			if reader, ok := host.(scm.PRContentReader); ok {
-				// Drafting takes a while; carry over closing lines the author
-				// added since the first read too.
-				latest, err := reader.GetPRContent(ctx, existing)
-				if err != nil {
-					return nil, fmt.Errorf("re-read existing PR before publication: %w", err)
-				}
-				content.Body, err = carryOverLatestClosingLines(sctx, content.Body, latest.Body, bodyLimit)
-				if err != nil {
-					return nil, err
-				}
-				if err := verifyClosingIssuesInBody(content.Body, sctx); err != nil {
-					return nil, err
-				}
 			}
 			updated, err = host.UpdatePR(ctx, existing, scm.PRContent(content))
 			if err != nil {

@@ -168,10 +168,8 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 			parts.before = emptyNarrative
 		}
 		// The author text around the appendix is kept verbatim, so only
-		// references it does not already close are added, and closing lines
-		// the previous appendix rendered are carried over.
+		// references it does not already close are added.
 		authorText := parts.before + "\n" + parts.after
-		sctx.PreservedClosingLines = ownedPreservedClosingLines(parts.appendix, authorText, prRepository(sctx))
 		content, err := composeOwnedPRContent(parts, title, appendIssuesSection(appendix, issuesSection(sctx, authorText)), bodyLimit)
 		if err != nil {
 			return err

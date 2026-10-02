@@ -1634,10 +1634,8 @@ func escapePipelineFoldMarkers(s string) string {
 // first marker in the body to the PR head. It also breaks copied PR-appendix
 // ownership markers (e.g. Testing evidence quoting a templated body): a raw
 // pair in an ordinary body makes every later restamp refuse it as ambiguous.
-// And it neutralizes closing references (neutralizeClosingReferences), since
-// every PR-body site that generates text passes through here.
 func neutralizeAttestationMarkers(s string) string {
-	return neutralizeClosingReferences(escapePRAppendixMarkers(strings.ReplaceAll(s, pipelineAttestationCommentPrefix, escapedPipelineAttestationCommentPrefix)))
+	return escapePRAppendixMarkers(strings.ReplaceAll(s, pipelineAttestationCommentPrefix, escapedPipelineAttestationCommentPrefix))
 }
 
 func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyFlavor) {
