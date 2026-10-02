@@ -20,6 +20,14 @@ const (
 
 var prAppendixMarkerPattern = regexp.MustCompile(`(?i)<!--\s*/?\s*` + prAppendixNamespace)
 
+func escapePRAppendixMarkers(s string) string {
+	return prAppendixMarkerPattern.ReplaceAllStringFunc(s, func(marker string) string {
+		// Break the namespace without rewriting ordinary mentions of its name.
+		i := strings.LastIndex(marker, "-")
+		return marker[:i] + "\\" + marker[i:]
+	})
+}
+
 func hasPRAppendixMarkers(body string) bool {
 	return prAppendixMarkerPattern.MatchString(body)
 }
@@ -119,11 +127,7 @@ func wrapPRAppendix(appendix string) string {
 func composeOwnedPRContent(parts prOwnedBody, title, appendix string, bodyLimit int) (prContent, error) {
 	before := redactPRContent(prContent{Body: parts.before}).Body
 	after := redactPRContent(prContent{Body: parts.after}).Body
-	appendix = prAppendixMarkerPattern.ReplaceAllStringFunc(appendix, func(marker string) string {
-		// Break the namespace without rewriting ordinary mentions of its name.
-		i := strings.LastIndex(marker, "-")
-		return marker[:i] + "\\" + marker[i:]
-	})
+	appendix = escapePRAppendixMarkers(appendix)
 	appendix = redactPRContent(prContent{Body: appendix}).Body
 	if !parts.managed && before != "" {
 		before += "\n\n"

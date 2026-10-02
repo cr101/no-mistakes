@@ -2728,6 +2728,48 @@ func TestPRStep_EmbeddedAttestationDoesNotShadowTheRealOne(t *testing.T) {
 	}
 }
 
+// TestPRStep_EvidenceQuotingAnOwnedBodyStaysRestampable: Testing evidence that
+// quotes a templated PR body carries that body's appendix ownership markers.
+// Copied raw into an ordinary body, they made every later restamp refuse the
+// body as ambiguously owned, so the run could never publish again.
+func TestPRStep_EvidenceQuotingAnOwnedBodyStaysRestampable(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			payload := json.RawMessage(`{"title":"feat(pr): keep closing references","body":"## What Changed\n\n- carry closing lines"}`)
+			return &agent.Result{Output: payload}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	quoted := "Author text\n\n" + wrapPRAppendix("## Issues\n\nCloses #95\n\n"+
+		pipelineAttestationCommentPrefix+`{"head_sha":"`+strings.Repeat("f", 40)+`","steps":[]}`+pipelineAttestationCommentClosingToken)
+	artifact, err := json.Marshal(map[string]string{"kind": "command-output", "label": "templated PR body", "content": quoted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[],"summary":"clean","testing_summary":"Captured the templated PR body.","artifacts":[` + string(artifact) + `]}`
+	insertCompletedStep(t, sctx, types.StepTest, findings, "")
+
+	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content.Body, "Closes #95") {
+		t.Fatalf("quoted evidence was dropped instead of neutralized:\n%s", content.Body)
+	}
+
+	newHead := strings.Repeat("ab", 20)
+	rebound, ok, err := rebindOwnedPRAttestation(content.Body, newHead, nil, pipelineAttestationPolicy{})
+	if err != nil || !ok {
+		t.Fatalf("restamp of an ordinary body quoting an owned body = ok %v, err %v:\n%s", ok, err, content.Body)
+	}
+	assertFirstAttestationBindsHead(t, rebound, newHead)
+}
+
 // assertFirstAttestationBindsHead mirrors verify.py's parse: the FIRST
 // attestation comment in the body must be the pipeline-authored one carrying
 // the run head, and it must be the only parseable marker in the body.
