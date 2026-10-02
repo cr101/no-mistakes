@@ -117,6 +117,19 @@ func TestNeutralizeClosingReferences(t *testing.T) {
 	}
 }
 
+func TestNeutralizeClosingReferencesURLForm(t *testing.T) {
+	t.Parallel()
+	in := "Fixes https://github.com/o/r/issues/12\nresolves: http://ghe.example.com:8080/o/r/pull/3.\nsee https://github.com/o/r/issues/5, `Closes https://github.com/o/r/issues/6`"
+	want := "Fixes `https://github.com/o/r/issues/12`\nresolves: `http://ghe.example.com:8080/o/r/pull/3`.\nsee https://github.com/o/r/issues/5, `Closes https://github.com/o/r/issues/6`"
+	got := neutralizeClosingReferences(in)
+	if got != want {
+		t.Fatalf("neutralizeClosingReferences = %q, want %q", got, want)
+	}
+	if again := neutralizeClosingReferences(got); again != got {
+		t.Fatalf("neutralizeClosingReferences is not idempotent: %q", again)
+	}
+}
+
 // pr.template bodies keep author text verbatim, so the requested reference
 // lives in the regenerated appendix, and is not repeated once the author's
 // own text closes the same issue.

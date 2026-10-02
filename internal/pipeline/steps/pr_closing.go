@@ -60,13 +60,13 @@ func extractClosingKeywordLines(body string) []string {
 	return lines
 }
 
-var closingReferenceInTextPattern = regexp.MustCompile(`(?i)\b((?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved):?\s+)((?:[A-Za-z0-9-]+/[A-Za-z0-9._-]+)?#[1-9][0-9]*)\b`)
+var closingReferenceInTextPattern = regexp.MustCompile(`(?i)\b((?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved):?\s+)((?:[A-Za-z0-9-]+/[A-Za-z0-9._-]+)?#[1-9][0-9]*|https?://[A-Za-z0-9.-]+(?::[0-9]+)?/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/(?:issues|pull)/[1-9][0-9]*)\b`)
 
 // neutralizeClosingReferences puts every closing-keyword reference in
-// pipeline-generated PR text in an inline code span ("Fixes `#12`"), outside
-// fenced, indented, and inline code. GitHub ignores a reference in code, so
-// nothing the pipeline publishes can close an issue; only the Issues section
-// carries live ones.
+// pipeline-generated PR text, including an issue or pull request URL, in an
+// inline code span ("Fixes `#12`"), outside fenced, indented, and inline code.
+// GitHub ignores a reference in code, so nothing the pipeline publishes can
+// close an issue; only the Issues section carries live ones.
 func neutralizeClosingReferences(s string) string {
 	if !closingReferenceInTextPattern.MatchString(s) {
 		return s
