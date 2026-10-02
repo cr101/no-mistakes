@@ -2,11 +2,13 @@ package steps
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
@@ -168,4 +170,127 @@ func readPRBodyFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+// An author can add a closing line while the update is drafting. The
+// full-body write must carry it over from the re-read rather than erase it.
+func TestPRStep_CarriesOverClosingLineAddedDuringDrafting(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "https://github.com/test/repo/pull/99")
+	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
+	if err := os.WriteFile(bodyFile, []byte("## Summary\n\nFixes #42\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		if err := os.WriteFile(bodyFile, []byte("## Summary\n\nFixes #42\nFixes #4.\n"), 0o644); err != nil {
+			return nil, err
+		}
+		return &agent.Result{}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.calls) == 0 {
+		t.Fatal("the author edit must land while the update is drafting")
+	}
+	lines := extractClosingKeywordLines(readPRBodyFile(t, bodyFile))
+	if got := strings.Join(lines, "|"); got != "Fixes #42|Fixes #4." {
+		t.Fatalf("closing lines = %q, want both author lines exactly once", got)
+	}
+}
+
+// A run carrying --closes must not skip publication because the PR host is
+// unavailable: nothing would close the requested issues. Without --closes the
+// step still skips.
+func TestPRStep_ClosesFailsInsteadOfSkippingWhenHostUnavailable(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		setup func(*testing.T, *pipeline.StepContext)
+	}{
+		{"unauthenticated", func(t *testing.T, sctx *pipeline.StepContext) {
+			sctx.Env = append(fakeCIGH(t, "OPEN", `[]`), "FAKE_CLI_AUTH_ERR=not logged in")
+		}},
+		{"no host", func(_ *testing.T, sctx *pipeline.StepContext) {
+			sctx.Repo.UpstreamURL = "https://bitbucket.org/test/repo.git"
+		}},
+	} {
+		for _, refs := range [][]string{nil, {"42"}} {
+			t.Run(fmt.Sprintf("%s/closes=%v", tc.name, refs), func(t *testing.T) {
+				t.Parallel()
+				dir, baseSHA, headSHA := setupGitRepo(t)
+				sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+				tc.setup(t, sctx)
+				if refs != nil {
+					if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, refs); err != nil {
+						t.Fatal(err)
+					}
+				}
+				outcome, err := (&PRStep{}).Execute(sctx)
+				if refs == nil {
+					if err != nil || outcome == nil || !outcome.Skipped {
+						t.Fatalf("outcome = %+v, err = %v; want skipped", outcome, err)
+					}
+					return
+				}
+				if err == nil || !strings.Contains(err.Error(), "--closes requires publishing a pull request") {
+					t.Fatalf("outcome = %+v, err = %v; want failure", outcome, err)
+				}
+			})
+		}
+	}
+}
+
+// Trailing punctuation and ordered-list items are ordinary ways to write a
+// standalone closing line; both extraction and verification must see them.
+func TestClosingKeywordLinesAcceptPunctuationAndOrderedLists(t *testing.T) {
+	body := "Fixes #4.\n1. Closes #5\n2) Resolves owner/repo#6;\nThis fixes #7 partly.\n"
+	got := strings.Join(extractClosingKeywordLines(body), "|")
+	if got != "Fixes #4.|1. Closes #5|2) Resolves owner/repo#6;" {
+		t.Fatalf("extractClosingKeywordLines() = %q", got)
+	}
+	sctx := &pipeline.StepContext{
+		ClosingIssueRefs:      []string{"4", "5", "owner/repo#6"},
+		PreservedClosingLines: []string{"Fixes #4.", "1. Closes #5"},
+	}
+	if err := verifyClosingIssuesInBody(body, sctx); err != nil {
+		t.Fatalf("verifyClosingIssuesInBody() = %v", err)
+	}
+	if err := verifyClosingIssuesInBody("Fixes #5.\n", sctx); err == nil {
+		t.Fatal("verifyClosingIssuesInBody() accepted a body missing preserved lines")
+	}
+}
+
+// `95` and `<own repo>#95` name the same issue, so it renders exactly once,
+// and an author's qualified line for the PR's own repository covers `95`.
+func TestPRStep_OwnRepositoryQualifiedReferenceRendersOnce(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "")
+	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, []string{"95", "Test/Repo#95", "other/repo#95"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	lines := extractClosingKeywordLines(readPRBodyFile(t, bodyFile))
+	if got := strings.Join(lines, "|"); got != "Closes #95|Closes other/repo#95" {
+		t.Fatalf("closing lines = %q, want #95 and other/repo#95 exactly once each", got)
+	}
+
+	authored := &pipeline.StepContext{ClosingIssueRefs: []string{"95"}, Repo: sctx.Repo}
+	if got := issuesSection(authored, "Closes TEST/repo#95"); got != "" {
+		t.Fatalf("issuesSection() = %q, want the author line to cover #95", got)
+	}
+	if err := verifyClosingIssuesInBody("Closes test/repo#95\n", authored); err != nil {
+		t.Fatalf("verifyClosingIssuesInBody() = %v", err)
+	}
 }

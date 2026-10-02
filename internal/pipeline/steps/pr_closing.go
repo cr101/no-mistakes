@@ -9,6 +9,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/closingissues"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/scm/github"
 )
 
 // Closing references in a PR body come from exactly two places, and nothing
@@ -32,10 +33,11 @@ const issuesSectionHeading = "## Issues"
 const closingKeywordPattern = `(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved):?\s+(?:#[1-9][0-9]*|[A-Za-z0-9-]+/[A-Za-z0-9._-]+#[1-9][0-9]*)`
 
 // closingKeywordLinePattern matches a line that consists only of GitHub
-// closing keywords and their targets, optionally as a list item. A reference
+// closing keywords and their targets, optionally as a bullet or ordered list
+// item and with trailing sentence punctuation. A reference
 // inside prose ("this fixes #4 partly") is deliberately not preserved: it is
 // not a standalone closing declaration.
-var closingKeywordLinePattern = regexp.MustCompile(`(?i)^(?:[-*]\s+)?` + closingKeywordPattern + `(?:\s*,\s*` + closingKeywordPattern + `)*$`)
+var closingKeywordLinePattern = regexp.MustCompile(`(?i)^(?:(?:[-*+]|[0-9]+[.)])\s+)?` + closingKeywordPattern + `(?:\s*,\s*` + closingKeywordPattern + `)*[.;!]?$`)
 
 var closingReferencePattern = regexp.MustCompile(`(?i)(?:[A-Za-z0-9-]+/[A-Za-z0-9._-]+#[1-9][0-9]*|#[1-9][0-9]*)`)
 
@@ -66,15 +68,34 @@ func extractClosingKeywordLines(body string) []string {
 }
 
 // closingTargets returns the canonical refs ("42", "owner/repo#42") closed
-// by the given closing-keyword lines.
-func closingTargets(lines []string) map[string]struct{} {
+// by the given closing-keyword lines. A reference qualified with repo, the
+// PR's own repository, is the bare number.
+func closingTargets(lines []string, repo string) map[string]struct{} {
 	targets := map[string]struct{}{}
 	for _, line := range lines {
 		for _, target := range closingReferencePattern.FindAllString(line, -1) {
-			targets[strings.ToLower(strings.TrimPrefix(target, "#"))] = struct{}{}
+			target = closingissues.Localize(strings.TrimPrefix(target, "#"), repo)
+			targets[strings.ToLower(target)] = struct{}{}
 		}
 	}
 	return targets
+}
+
+// prRepository returns the owner/repository the PR lives in, or "" when it
+// is unknown.
+func prRepository(sctx *pipeline.StepContext) string {
+	if sctx == nil {
+		return ""
+	}
+	if sctx.Repo != nil {
+		if repo := github.RepoSlug(sctx.Repo.UpstreamURL); repo != "" {
+			return repo
+		}
+	}
+	if sctx.Run != nil && sctx.Run.PRURL != nil {
+		return github.RepoSlug(*sctx.Run.PRURL)
+	}
+	return ""
 }
 
 func closingLine(ref string) string {
@@ -90,7 +111,7 @@ func issuesSection(sctx *pipeline.StepContext, authorText string) string {
 		return ""
 	}
 	lines := append([]string(nil), sctx.PreservedClosingLines...)
-	present := closingTargets(append(append([]string(nil), lines...), extractClosingKeywordLines(authorText)...))
+	present := closingTargets(append(append([]string(nil), lines...), extractClosingKeywordLines(authorText)...), prRepository(sctx))
 	for _, ref := range sctx.ClosingIssueRefs {
 		key := strings.ToLower(ref)
 		if _, exists := present[key]; exists {
@@ -128,6 +149,16 @@ func claimClosingIssueRefs(sctx *pipeline.StepContext, host scm.Host, provider s
 	if err != nil {
 		return fmt.Errorf("resolve closing issue references: %w", err)
 	}
+	// The PR's own repository names an issue one way, so `95` and
+	// `owner/repo#95` render once.
+	repo := prRepository(sctx)
+	for i, ref := range refs {
+		refs[i] = closingissues.Localize(ref, repo)
+	}
+	refs, err = closingissues.Normalize(refs)
+	if err != nil {
+		return fmt.Errorf("resolve closing issue references: %w", err)
+	}
 	sctx.ClosingIssueRefs = refs
 	if len(refs) == 0 {
 		return nil
@@ -139,6 +170,54 @@ func claimClosingIssueRefs(sctx *pipeline.StepContext, host scm.Host, provider s
 		return fmt.Errorf("verify closing issues: provider cannot read the current pull request body")
 	}
 	return nil
+}
+
+// refuseSkipWithClosingIssues fails a PR step that would be skipped while the
+// run carries --closes references: skipping publishes no body that closes
+// them. The claim makes a concurrent reattach fail closed too.
+func refuseSkipWithClosingIssues(sctx *pipeline.StepContext, reason string) error {
+	if sctx.DB == nil {
+		return nil
+	}
+	refs, err := sctx.DB.ClaimClosingIssueRefsForPRBody(sctx.Run.ID)
+	if err != nil {
+		return fmt.Errorf("resolve closing issue references: %w", err)
+	}
+	if len(refs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("render closing issues: --closes requires publishing a pull request, but PR creation is unavailable: %s", reason)
+}
+
+// carryOverLatestClosingLines adds the standalone closing lines of a re-read
+// live body that the drafted body does not carry yet to
+// sctx.PreservedClosingLines and re-renders body's trailing Issues section.
+func carryOverLatestClosingLines(sctx *pipeline.StepContext, body, latestBody string, bodyLimit int) (string, error) {
+	have := make(map[string]struct{}, len(sctx.PreservedClosingLines))
+	for _, line := range sctx.PreservedClosingLines {
+		have[strings.ToLower(line)] = struct{}{}
+	}
+	previous := issuesSection(sctx, "")
+	added := false
+	for _, line := range extractClosingKeywordLines(latestBody) {
+		if _, ok := have[strings.ToLower(line)]; ok {
+			continue
+		}
+		sctx.PreservedClosingLines = append(sctx.PreservedClosingLines, line)
+		added = true
+	}
+	if !added {
+		return body, nil
+	}
+	if previous != "" && strings.HasSuffix(body, previous) {
+		body = strings.TrimSuffix(body, previous) + issuesSection(sctx, "")
+	} else {
+		body = appendIssuesSection(body, issuesSection(sctx, ""))
+	}
+	if len(body) > maxPullRequestBodyBytes || (bodyLimit > 0 && scm.PRBodyLen(body) > bodyLimit) {
+		return "", fmt.Errorf("verify closing issues: PR body exceeds provider budget after carrying over closing lines added during drafting")
+	}
+	return body, nil
 }
 
 // verifyClosingIssues re-reads the live PR body and fails unless it still
@@ -177,7 +256,7 @@ func verifyClosingIssuesInBody(body string, sctx *pipeline.StepContext) error {
 			return fmt.Errorf("verify closing issues: pull request body dropped closing line %q", line)
 		}
 	}
-	targets := closingTargets(present)
+	targets := closingTargets(present, prRepository(sctx))
 	for _, ref := range sctx.ClosingIssueRefs {
 		if _, ok := targets[strings.ToLower(ref)]; !ok {
 			return fmt.Errorf("verify closing issues: pull request body is missing %s", closingLine(ref))
@@ -214,16 +293,16 @@ func assembleDraftPRBody(sctx *pipeline.StepContext, whatChanged, riskLine, test
 // an owned body's previous appendix rendered, minus those whose targets the
 // verbatim author text already closes. Replacing that appendix must not
 // silently unlink an issue a previous run's --closes added.
-func ownedPreservedClosingLines(previousAppendix, authorText string) []string {
+func ownedPreservedClosingLines(previousAppendix, authorText, repo string) []string {
 	start := strings.LastIndex("\n"+previousAppendix, "\n"+issuesSectionHeading+"\n")
 	if start < 0 {
 		return nil
 	}
-	closed := closingTargets(extractClosingKeywordLines(authorText))
+	closed := closingTargets(extractClosingKeywordLines(authorText), repo)
 	var lines []string
 	for _, line := range extractClosingKeywordLines(previousAppendix[start:]) {
 		covered := true
-		for target := range closingTargets([]string{line}) {
+		for target := range closingTargets([]string{line}, repo) {
 			if _, ok := closed[target]; !ok {
 				covered = false
 			}

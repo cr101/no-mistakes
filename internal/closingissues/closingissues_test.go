@@ -38,3 +38,16 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 		t.Fatalf("round trip = %q", refs)
 	}
 }
+
+func TestLocalizeOwnRepositoryReference(t *testing.T) {
+	for _, tc := range []struct{ ref, repo, want string }{
+		{"owner/repo#95", "Owner/Repo", "95"},
+		{"other/repo#95", "owner/repo", "other/repo#95"},
+		{"95", "owner/repo", "95"},
+		{"owner/repo#95", "", "owner/repo#95"},
+	} {
+		if got := Localize(tc.ref, tc.repo); got != tc.want {
+			t.Fatalf("Localize(%q, %q) = %q, want %q", tc.ref, tc.repo, got, tc.want)
+		}
+	}
+}

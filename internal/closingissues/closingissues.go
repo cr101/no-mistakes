@@ -68,6 +68,17 @@ func Covers(have, want []string) bool {
 	return true
 }
 
+// Localize returns ref as a bare issue number when it is qualified with repo
+// (owner/repository, compared case-insensitively), so a PR's own repository
+// names each issue one way. Other references are returned unchanged.
+func Localize(ref, repo string) string {
+	prefix, number, qualified := strings.Cut(ref, "#")
+	if qualified && repo != "" && strings.EqualFold(prefix, repo) {
+		return number
+	}
+	return ref
+}
+
 // Target returns the syntax GitHub closing keywords expect after the keyword.
 func Target(ref string) string {
 	if strings.Contains(ref, "#") {
