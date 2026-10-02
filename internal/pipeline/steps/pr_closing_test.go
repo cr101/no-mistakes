@@ -2,12 +2,14 @@ package steps
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
@@ -30,6 +32,88 @@ func TestPRStep_NeverInfersClosingReferenceFromIntent(t *testing.T) {
 	body := readPRBodyFile(t, bodyFile)
 	if strings.Contains(body, "## Issues") || len(extractClosingKeywordLines(body)) != 0 {
 		t.Fatalf("closing reference inferred without --closes:\n%s", body)
+	}
+}
+
+// The pipeline publishes a closing reference in the intent neutralized, so
+// without --closes the PR closes nothing.
+func TestPRStep_NeutralizesClosingReferenceInPublishedIntent(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "")
+	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.UserIntent = "Refactor X\nFixes #12"
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	body := readPRBodyFile(t, bodyFile)
+	if !strings.Contains(body, "Fixes `#12`") || strings.Contains(body, "## Issues") || len(extractClosingKeywordLines(body)) != 0 {
+		t.Fatalf("intent's Fixes #12 must be published neutralized:\n%s", body)
+	}
+}
+
+// A closing reference in the agent-drafted narrative is published
+// neutralized: closure comes only from --closes.
+func TestPRStep_NeutralizesClosingReferenceInDraftedNarrative(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "")
+	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
+	ag := &mockAgent{name: "test", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		payload := json.RawMessage(`{"title":"add widget","body":"## What Changed\n\n- add widget\n\nCloses #7"}`)
+		return &agent.Result{Output: payload}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	body := readPRBodyFile(t, bodyFile)
+	if !strings.Contains(body, "Closes `#7`") || strings.Contains(body, "## Issues") || len(extractClosingKeywordLines(body)) != 0 {
+		t.Fatalf("drafted closing reference not neutralized:\n%s", body)
+	}
+}
+
+// With --closes, only the Issues section closes: a drafted reference to the
+// same issue is neutralized and the requested one renders and verifies once.
+func TestPRStep_ClosesRendersOnlyInIssuesSection(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "")
+	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
+	ag := &mockAgent{name: "test", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		payload := json.RawMessage(`{"title":"add widget","body":"## What Changed\n\n- add widget\n\nCloses #95"}`)
+		return &agent.Result{Output: payload}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, []string{"95"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	body := readPRBodyFile(t, bodyFile)
+	if got := strings.Join(extractClosingKeywordLines(body), "|"); got != "Closes #95" || !strings.Contains(body, "## Issues\n\nCloses #95") {
+		t.Fatalf("closing lines = %q, want only the Issues section's Closes #95:\n%s", got, body)
+	}
+}
+
+func TestNeutralizeClosingReferences(t *testing.T) {
+	t.Parallel()
+	in := "Fixes #12 and resolved: owner/repo#3\n- closes #4.\nsee #5, fixes `#6`, `Fixes #7`\n```\nCloses #8\n```\n    Fixes #9"
+	want := "Fixes `#12` and resolved: `owner/repo#3`\n- closes `#4`.\nsee #5, fixes `#6`, `Fixes #7`\n```\nCloses #8\n```\n    Fixes #9"
+	got := neutralizeClosingReferences(in)
+	if got != want {
+		t.Fatalf("neutralizeClosingReferences = %q, want %q", got, want)
+	}
+	if again := neutralizeClosingReferences(got); again != got {
+		t.Fatalf("neutralizeClosingReferences is not idempotent: %q", again)
 	}
 }
 

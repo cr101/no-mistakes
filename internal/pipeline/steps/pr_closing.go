@@ -18,7 +18,8 @@ import (
 // section. An author-preserving (pr.template) body keeps its author text
 // verbatim, so only the references the author text does not already close
 // are added to its generated appendix. Closure is never inferred from intent,
-// commits, or branch names.
+// commits, or branch names: pipeline-generated text is published with its
+// closing references neutralized (neutralizeClosingReferences).
 
 const issuesSectionHeading = "## Issues"
 
@@ -57,6 +58,75 @@ func extractClosingKeywordLines(body string) []string {
 		lines = append(lines, line)
 	}
 	return lines
+}
+
+var closingReferenceInTextPattern = regexp.MustCompile(`(?i)\b((?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved):?\s+)((?:[A-Za-z0-9-]+/[A-Za-z0-9._-]+)?#[1-9][0-9]*)\b`)
+
+// neutralizeClosingReferences puts every closing-keyword reference in
+// pipeline-generated PR text in an inline code span ("Fixes `#12`"), outside
+// fenced, indented, and inline code. GitHub ignores a reference in code, so
+// nothing the pipeline publishes can close an issue; only the Issues section
+// carries live ones.
+func neutralizeClosingReferences(s string) string {
+	if !closingReferenceInTextPattern.MatchString(s) {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	var fence markdownFence
+	for i, raw := range lines {
+		inFence := fence.marker != 0
+		fence.consume(raw)
+		if inFence || fence.marker != 0 || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
+			continue
+		}
+		lines[i] = outsideInlineCode(raw, func(text string) string {
+			return closingReferenceInTextPattern.ReplaceAllString(text, "${1}`${2}`")
+		})
+	}
+	return strings.Join(lines, "\n")
+}
+
+// outsideInlineCode applies rewrite to the parts of line outside inline code
+// spans. A backtick run without a matching closing run is literal text.
+func outsideInlineCode(line string, rewrite func(string) string) string {
+	var b strings.Builder
+	text := 0
+	for i := 0; i < len(line); {
+		if line[i] != '`' {
+			i++
+			continue
+		}
+		n := 1
+		for i+n < len(line) && line[i+n] == '`' {
+			n++
+		}
+		closing := -1
+		for j := i + n; j < len(line); {
+			if line[j] != '`' {
+				j++
+				continue
+			}
+			m := 1
+			for j+m < len(line) && line[j+m] == '`' {
+				m++
+			}
+			if m == n {
+				closing = j
+				break
+			}
+			j += m
+		}
+		if closing < 0 {
+			i += n
+			continue
+		}
+		b.WriteString(rewrite(line[text:i]))
+		b.WriteString(line[i : closing+n])
+		i = closing + n
+		text = i
+	}
+	b.WriteString(rewrite(line[text:]))
+	return b.String()
 }
 
 // closingTargets returns the canonical refs ("42", "owner/repo#42") closed
