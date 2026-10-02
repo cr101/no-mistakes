@@ -125,7 +125,8 @@ func TestClosingIssueRefsAuthorRemovesLineDuringDrafting(t *testing.T) {
 
 // TestClosingIssueRefsNeverCarriesPublishedIntent: run 1 publishes an intent
 // containing its own "## Goal" heading and a "Fixes #12" line without
-// --closes; run 2 (a plain gate push) must not turn that published intent
+// --closes, which must be published neutralized (never a live closing
+// reference); run 2 (a plain gate push) must not turn that published intent
 // line into a carried-over closing reference.
 func TestClosingIssueRefsNeverCarriesPublishedIntent(t *testing.T) {
 	h := NewHarness(t, SetupOpts{Agent: "claude"})
@@ -145,8 +146,8 @@ func TestClosingIssueRefsNeverCarriesPublishedIntent(t *testing.T) {
 	if issuesSection(body) != "" {
 		t.Errorf("run without --closes rendered an Issues section; body:\n%s", body)
 	}
-	if exactLineCount(body, "## Goal") != 0 {
-		t.Errorf("published intent kept a level-2 heading; body:\n%s", body)
+	if exactLineCount(body, "Fixes `#12`") != 1 || exactLineCount(body, "Fixes #12") != 0 {
+		t.Errorf("published intent line was not neutralized exactly once; body:\n%s", body)
 	}
 
 	h.Checkout("main")
