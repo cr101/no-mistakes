@@ -1,6 +1,8 @@
 package steps
 
 import (
+	"strings"
+
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 )
 
@@ -34,7 +36,35 @@ func publicPRIntent(sctx *pipeline.StepContext) string {
 	if runOmitsIntent(sctx) {
 		return ""
 	}
-	return cleanedUserIntent(sctx)
+	return demoteTopLevelHeadings(cleanedUserIntent(sctx))
+}
+
+// demoteTopLevelHeadings rewrites ATX level-1 and level-2 headings outside
+// fenced code as level 3, so published intent nests under its own `## Intent`
+// heading and can never open a section of the PR body.
+func demoteTopLevelHeadings(text string) string {
+	lines := strings.Split(text, "\n")
+	var fence markdownFence
+	for i, raw := range lines {
+		inFence := fence.marker != 0
+		fence.consume(raw)
+		if inFence || fence.marker != 0 {
+			continue
+		}
+		trimmed := strings.TrimLeft(raw, " ")
+		if len(raw)-len(trimmed) > 3 {
+			continue
+		}
+		n := 0
+		for n < len(trimmed) && trimmed[n] == '#' {
+			n++
+		}
+		if n == 0 || n > 2 || n < len(trimmed) && trimmed[n] != ' ' && trimmed[n] != '\t' && trimmed[n] != '\r' {
+			continue
+		}
+		lines[i] = raw[:len(raw)-len(trimmed)] + "###" + trimmed[n:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 // runOmitsIntent reports whether this run was started with the caller-side,

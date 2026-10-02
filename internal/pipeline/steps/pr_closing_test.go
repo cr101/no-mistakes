@@ -100,20 +100,29 @@ func TestPRStep_NeverCarriesOverClosingLineFromPublishedIntent(t *testing.T) {
 	}
 }
 
-// A heading inside published Testing evidence does not end the generated
-// section, so a closing line after it is never carried over, while lines in
-// What Changed and Issues still are.
+// Closing lines under a nested heading inside a generated section are never
+// carried over, while an author's line under any other level-2 heading is,
+// even after a generated section.
 func TestAuthorClosingKeywordLinesSkipEvidenceAfterNestedHeading(t *testing.T) {
 	t.Parallel()
 	body := strings.Join([]string{
-		"## Intent", "", "## Goal", "Fixes #12", "",
+		"## Intent", "", "### Goal", "Fixes #12", "",
 		"## What Changed", "", "- refactor", "Fixes #3", "",
-		"## Testing", "", "## Quoted PR body", "Closes #95", "",
+		"## Testing", "", "### Quoted PR body", "Closes #95", "",
 		"## Pipeline", "", "## Notes", "Resolves #8", "",
 		"## Issues", "", "Closes #7",
 	}, "\n")
-	if got := strings.Join(authorClosingKeywordLines(body), "|"); got != "Fixes #3|Closes #7" {
-		t.Fatalf("author closing lines = %q, want only What Changed and Issues lines", got)
+	if got := strings.Join(authorClosingKeywordLines(body), "|"); got != "Fixes #3|Resolves #8|Closes #7" {
+		t.Fatalf("author closing lines = %q, want every line outside generated sections", got)
+	}
+}
+
+func TestDemoteTopLevelHeadingsNestsIntentHeadings(t *testing.T) {
+	t.Parallel()
+	in := "# Title\n## Goal\n### Kept\n#5 is not a heading\n```\n## in code\n```\ntext"
+	want := "### Title\n### Goal\n### Kept\n#5 is not a heading\n```\n## in code\n```\ntext"
+	if got := demoteTopLevelHeadings(in); got != want {
+		t.Fatalf("demoteTopLevelHeadings = %q, want %q", got, want)
 	}
 }
 
