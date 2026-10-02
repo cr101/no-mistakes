@@ -29,7 +29,10 @@ import (
 // generated appendix. Closure is never inferred from intent, commits, or
 // branch names.
 
-const issuesSectionHeading = "## Issues"
+const (
+	issuesSectionHeading = "## Issues"
+	whatChangedHeading   = "## What Changed"
+)
 
 const closingKeywordPattern = `(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved):?\s+(?:#[1-9][0-9]*|[A-Za-z0-9-]+/[A-Za-z0-9._-]+#[1-9][0-9]*)`
 
@@ -52,7 +55,10 @@ func extractClosingKeywordLines(body string) []string {
 // live body whose closing lines an update carries over: lines inside the
 // pipeline-generated Intent, Risk Assessment, Testing, and Pipeline sections
 // are skipped, so closure is never inferred from published intent or
-// evidence. The Issues section and everything else count as author lines.
+// evidence. A generated section ends only at the next heading the pipeline
+// itself emits (What Changed, Issues, or another generated section), so a
+// heading inside published intent or evidence cannot end it early. The
+// Issues section and everything else count as author lines.
 func authorClosingKeywordLines(body string) []string {
 	return closingKeywordLines(body, true)
 }
@@ -70,7 +76,12 @@ func closingKeywordLines(body string, skipGenerated bool) []string {
 		}
 		line := strings.TrimSpace(raw)
 		if skipGenerated && strings.HasPrefix(line, "## ") {
-			generated = isGeneratedSectionHeading(line) && !strings.EqualFold(line, issuesSectionHeading)
+			switch {
+			case strings.EqualFold(line, issuesSectionHeading) || strings.EqualFold(line, whatChangedHeading):
+				generated = false
+			case isGeneratedSectionHeading(line):
+				generated = true
+			}
 		}
 		if generated || !closingKeywordLinePattern.MatchString(line) {
 			continue

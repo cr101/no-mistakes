@@ -60,38 +60,60 @@ func TestPRStep_NeverInfersClosingReferenceFromIntent(t *testing.T) {
 // author line: a later run with a different intent must not carry it over.
 func TestPRStep_NeverCarriesOverClosingLineFromPublishedIntent(t *testing.T) {
 	t.Parallel()
-	dir, baseSHA, headSHA := setupGitRepo(t)
-	env, _ := fakeGH(t, "")
-	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
-	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Env = env
-	sctx.UserIntent = "Refactor X\nFixes #12"
-	if _, err := (&PRStep{}).Execute(sctx); err != nil {
-		t.Fatalf("run 1: %v", err)
-	}
-	first := readPRBodyFile(t, bodyFile)
-	if got := strings.Join(extractClosingKeywordLines(first), "|"); got != "Fixes #12" {
-		t.Fatalf("run 1 must publish the intent's standalone Fixes #12, got %q:\n%s", got, first)
-	}
+	for _, intent := range []string{"Refactor X\nFixes #12", "## Goal\nRefactor X\nFixes #12"} {
+		t.Run(intent, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			env, _ := fakeGH(t, "")
+			bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Env = env
+			sctx.UserIntent = intent
+			if _, err := (&PRStep{}).Execute(sctx); err != nil {
+				t.Fatalf("run 1: %v", err)
+			}
+			first := readPRBodyFile(t, bodyFile)
+			if got := strings.Join(extractClosingKeywordLines(first), "|"); got != "Fixes #12" {
+				t.Fatalf("run 1 must publish the intent's standalone Fixes #12, got %q:\n%s", got, first)
+			}
 
-	dir, baseSHA, headSHA = setupGitRepo(t)
-	env, _ = fakeGH(t, "https://github.com/test/repo/pull/99")
-	bodyFile = envEntry(env, "FAKE_CLI_PR_BODY_FILE")
-	if err := os.WriteFile(bodyFile, []byte(first), 0o644); err != nil {
-		t.Fatal(err)
+			dir, baseSHA, headSHA = setupGitRepo(t)
+			env, _ = fakeGH(t, "https://github.com/test/repo/pull/99")
+			bodyFile = envEntry(env, "FAKE_CLI_PR_BODY_FILE")
+			if err := os.WriteFile(bodyFile, []byte(first), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			sctx = newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Env = env
+			sctx.UserIntent = "Refactor Y"
+			if _, err := (&PRStep{}).Execute(sctx); err != nil {
+				t.Fatalf("run 2: %v", err)
+			}
+			body := readPRBodyFile(t, bodyFile)
+			if !strings.Contains(body, "Refactor Y") {
+				t.Fatalf("run 2 did not replace the body:\n%s", body)
+			}
+			if strings.Contains(body, "## Issues") || len(extractClosingKeywordLines(body)) != 0 {
+				t.Fatalf("closing line carried over from the published intent:\n%s", body)
+			}
+		})
 	}
-	sctx = newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Env = env
-	sctx.UserIntent = "Refactor Y"
-	if _, err := (&PRStep{}).Execute(sctx); err != nil {
-		t.Fatalf("run 2: %v", err)
-	}
-	body := readPRBodyFile(t, bodyFile)
-	if !strings.Contains(body, "Refactor Y") {
-		t.Fatalf("run 2 did not replace the body:\n%s", body)
-	}
-	if strings.Contains(body, "## Issues") || len(extractClosingKeywordLines(body)) != 0 {
-		t.Fatalf("closing line carried over from the published intent:\n%s", body)
+}
+
+// A heading inside published Testing evidence does not end the generated
+// section, so a closing line after it is never carried over, while lines in
+// What Changed and Issues still are.
+func TestAuthorClosingKeywordLinesSkipEvidenceAfterNestedHeading(t *testing.T) {
+	t.Parallel()
+	body := strings.Join([]string{
+		"## Intent", "", "## Goal", "Fixes #12", "",
+		"## What Changed", "", "- refactor", "Fixes #3", "",
+		"## Testing", "", "## Quoted PR body", "Closes #95", "",
+		"## Pipeline", "", "## Notes", "Resolves #8", "",
+		"## Issues", "", "Closes #7",
+	}, "\n")
+	if got := strings.Join(authorClosingKeywordLines(body), "|"); got != "Fixes #3|Closes #7" {
+		t.Fatalf("author closing lines = %q, want only What Changed and Issues lines", got)
 	}
 }
 
