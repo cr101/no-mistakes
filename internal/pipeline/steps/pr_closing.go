@@ -189,35 +189,43 @@ func refuseSkipWithClosingIssues(sctx *pipeline.StepContext, reason string) erro
 	return fmt.Errorf("render closing issues: --closes requires publishing a pull request, but PR creation is unavailable: %s", reason)
 }
 
-// carryOverLatestClosingLines adds the standalone closing lines of a re-read
-// live body that the drafted body does not carry yet to
-// sctx.PreservedClosingLines and re-renders body's trailing Issues section.
+// carryOverLatestClosingLines makes the re-read live body authoritative for
+// which of the author's standalone closing lines still exist: lines added
+// since the first read are carried over, and lines the author removed are
+// dropped rather than written back. sctx.PreservedClosingLines is replaced
+// with the latest extract and body's trailing Issues section is re-rendered.
 func carryOverLatestClosingLines(sctx *pipeline.StepContext, body, latestBody string, bodyLimit int) (string, error) {
-	have := make(map[string]struct{}, len(sctx.PreservedClosingLines))
-	for _, line := range sctx.PreservedClosingLines {
-		have[strings.ToLower(line)] = struct{}{}
-	}
-	previous := issuesSection(sctx, "")
-	added := false
-	for _, line := range extractClosingKeywordLines(latestBody) {
-		if _, ok := have[strings.ToLower(line)]; ok {
-			continue
-		}
-		sctx.PreservedClosingLines = append(sctx.PreservedClosingLines, line)
-		added = true
-	}
-	if !added {
+	latest := extractClosingKeywordLines(latestBody)
+	if sameClosingLines(sctx.PreservedClosingLines, latest) {
 		return body, nil
 	}
-	if previous != "" && strings.HasSuffix(body, previous) {
-		body = strings.TrimSuffix(body, previous) + issuesSection(sctx, "")
-	} else {
-		body = appendIssuesSection(body, issuesSection(sctx, ""))
+	previous := issuesSection(sctx, "")
+	if previous != "" {
+		if !strings.HasSuffix(body, previous) {
+			// Never guess where the section is; refuse rather than publish
+			// a closing line the author removed.
+			return "", fmt.Errorf("verify closing issues: cannot locate the Issues section to reconcile closing lines changed during drafting")
+		}
+		body = strings.TrimRight(strings.TrimSuffix(body, previous), "\n")
 	}
+	sctx.PreservedClosingLines = latest
+	body = appendIssuesSection(body, issuesSection(sctx, ""))
 	if len(body) > maxPullRequestBodyBytes || (bodyLimit > 0 && scm.PRBodyLen(body) > bodyLimit) {
 		return "", fmt.Errorf("verify closing issues: PR body exceeds provider budget after carrying over closing lines added during drafting")
 	}
 	return body, nil
+}
+
+func sameClosingLines(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !strings.EqualFold(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // verifyClosingIssues re-reads the live PR body and fails unless it still

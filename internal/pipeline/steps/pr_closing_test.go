@@ -203,6 +203,41 @@ func TestPRStep_CarriesOverClosingLineAddedDuringDrafting(t *testing.T) {
 	}
 }
 
+// The pre-write re-read is authoritative both ways: a closing line the author
+// removed while the update was drafting must not be written back, or the PR
+// would close an issue the author no longer means to close.
+func TestPRStep_DropsClosingLineRemovedDuringDrafting(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "https://github.com/test/repo/pull/99")
+	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
+	if err := os.WriteFile(bodyFile, []byte("## Summary\n\nFixes #42\nCloses #7\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		if err := os.WriteFile(bodyFile, []byte("## Summary\n\nCloses #7\n"), 0o644); err != nil {
+			return nil, err
+		}
+		return &agent.Result{}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, []string{"95"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.calls) == 0 {
+		t.Fatal("the author edit must land while the update is drafting")
+	}
+	body := readPRBodyFile(t, bodyFile)
+	if got := strings.Join(extractClosingKeywordLines(body), "|"); got != "Closes #7|Closes #95" {
+		t.Fatalf("closing lines = %q, want the removed Fixes #42 gone and the rest once:\n%s", got, body)
+	}
+}
+
 // A run carrying --closes must not skip publication because the PR host is
 // unavailable: nothing would close the requested issues. Without --closes the
 // step still skips.
