@@ -175,7 +175,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		} else {
 			// This update replaces the whole body. Carry the author's standalone
 			// closing lines over so it never silently unlinks an issue.
-			sctx.PreservedClosingLines = extractClosingKeywordLines(live.Body)
+			sctx.PreservedClosingLines = authorClosingKeywordLines(live.Body)
 			content, err := s.buildPRContent(sctx, branch, baseBranch, baseSHA, provider, bodyLimit)
 			if err != nil {
 				return nil, err

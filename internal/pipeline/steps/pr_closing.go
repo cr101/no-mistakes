@@ -18,7 +18,8 @@ import (
 //   - explicit `axi run --closes` values, persisted on the run and claimed
 //     once by the PR step (sctx.ClosingIssueRefs);
 //   - standalone closing-keyword lines already in a live PR body that an
-//     ordinary (unowned) update is about to replace, or in the Issues section
+//     ordinary (unowned) update is about to replace (outside its
+//     pipeline-generated sections), or in the Issues section
 //     of an owned body's appendix that an owned update is about to replace
 //     (sctx.PreservedClosingLines).
 //
@@ -44,9 +45,23 @@ var closingReferencePattern = regexp.MustCompile(`(?i)(?:[A-Za-z0-9-]+/[A-Za-z0-
 // extractClosingKeywordLines returns the distinct standalone closing-keyword
 // lines of body, outside fenced and indented code blocks.
 func extractClosingKeywordLines(body string) []string {
+	return closingKeywordLines(body, false)
+}
+
+// authorClosingKeywordLines is extractClosingKeywordLines for an ordinary
+// live body whose closing lines an update carries over: lines inside the
+// pipeline-generated Intent, Risk Assessment, Testing, and Pipeline sections
+// are skipped, so closure is never inferred from published intent or
+// evidence. The Issues section and everything else count as author lines.
+func authorClosingKeywordLines(body string) []string {
+	return closingKeywordLines(body, true)
+}
+
+func closingKeywordLines(body string, skipGenerated bool) []string {
 	seen := map[string]struct{}{}
 	var lines []string
 	var fence markdownFence
+	generated := false
 	for _, raw := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
 		inFence := fence.marker != 0
 		fence.consume(raw)
@@ -54,7 +69,10 @@ func extractClosingKeywordLines(body string) []string {
 			continue
 		}
 		line := strings.TrimSpace(raw)
-		if !closingKeywordLinePattern.MatchString(line) {
+		if skipGenerated && strings.HasPrefix(line, "## ") {
+			generated = isGeneratedSectionHeading(line) && !strings.EqualFold(line, issuesSectionHeading)
+		}
+		if generated || !closingKeywordLinePattern.MatchString(line) {
 			continue
 		}
 		key := strings.ToLower(line)
@@ -195,7 +213,7 @@ func refuseSkipWithClosingIssues(sctx *pipeline.StepContext, reason string) erro
 // dropped rather than written back. sctx.PreservedClosingLines is replaced
 // with the latest extract and body's trailing Issues section is re-rendered.
 func carryOverLatestClosingLines(sctx *pipeline.StepContext, body, latestBody string, bodyLimit int) (string, error) {
-	latest := extractClosingKeywordLines(latestBody)
+	latest := authorClosingKeywordLines(latestBody)
 	if sameClosingLines(sctx.PreservedClosingLines, latest) {
 		return body, nil
 	}

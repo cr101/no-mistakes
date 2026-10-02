@@ -56,6 +56,45 @@ func TestPRStep_NeverInfersClosingReferenceFromIntent(t *testing.T) {
 	}
 }
 
+// A closing line a previous run published inside its Intent section is not an
+// author line: a later run with a different intent must not carry it over.
+func TestPRStep_NeverCarriesOverClosingLineFromPublishedIntent(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "")
+	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.UserIntent = "Refactor X\nFixes #12"
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatalf("run 1: %v", err)
+	}
+	first := readPRBodyFile(t, bodyFile)
+	if got := strings.Join(extractClosingKeywordLines(first), "|"); got != "Fixes #12" {
+		t.Fatalf("run 1 must publish the intent's standalone Fixes #12, got %q:\n%s", got, first)
+	}
+
+	dir, baseSHA, headSHA = setupGitRepo(t)
+	env, _ = fakeGH(t, "https://github.com/test/repo/pull/99")
+	bodyFile = envEntry(env, "FAKE_CLI_PR_BODY_FILE")
+	if err := os.WriteFile(bodyFile, []byte(first), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sctx = newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.UserIntent = "Refactor Y"
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatalf("run 2: %v", err)
+	}
+	body := readPRBodyFile(t, bodyFile)
+	if !strings.Contains(body, "Refactor Y") {
+		t.Fatalf("run 2 did not replace the body:\n%s", body)
+	}
+	if strings.Contains(body, "## Issues") || len(extractClosingKeywordLines(body)) != 0 {
+		t.Fatalf("closing line carried over from the published intent:\n%s", body)
+	}
+}
+
 // pr.template bodies keep author text verbatim, so the requested reference
 // lives in the regenerated appendix, and is not repeated once the author's
 // own text closes the same issue.
