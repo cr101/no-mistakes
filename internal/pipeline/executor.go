@@ -266,18 +266,8 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 
 		sr := stepRecords[step.Name()]
 		if e.skips[step.Name()] {
-			if step.Name() == types.StepPR {
-				refs, err := e.db.ClaimClosingIssueRefsForPRBody(run.ID)
-				if err == nil && len(refs) > 0 {
-					err = fmt.Errorf("render closing issues: --closes requires publishing a pull request, but PR creation is unavailable: the pr step is skipped")
-				}
-				if err != nil {
-					if dbErr := e.db.FailStep(sr.ID, err.Error(), 0); dbErr != nil {
-						slog.Warn("failed to mark step as failed in db", "step", step.Name(), "error", dbErr)
-					}
-					e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, step.Name(), string(types.StepStatusFailed), "", err.Error(), nil)
-					return e.failRun(run, repo, fmt.Errorf("step %s failed: %s", step.Name(), err), ctx)
-				}
+			if err := e.refuseSkippedPRWithClosingIssues(run, repo, step.Name(), sr.ID); err != nil {
+				return e.failRun(run, repo, err, ctx)
 			}
 			if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
 				return e.failRun(run, repo, fmt.Errorf("skip step %s: %w", step.Name(), err), ctx)
@@ -301,6 +291,9 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 			// Mark all subsequent steps as skipped
 			for _, remaining := range e.steps[i+1:] {
 				rsr := stepRecords[remaining.Name()]
+				if err := e.refuseSkippedPRWithClosingIssues(run, repo, remaining.Name(), rsr.ID); err != nil {
+					return e.failRun(run, repo, err, ctx)
+				}
 				if dbErr := e.db.CompleteStepWithStatus(rsr.ID, types.StepStatusSkipped, 0, 0, ""); dbErr != nil {
 					slog.Warn("failed to finalize skipped step", "step", remaining.Name(), "error", dbErr)
 				}
@@ -820,6 +813,9 @@ func (e *Executor) skipRecoveredRemainder(run *db.Run, repo *db.Repo, start int)
 		if index >= len(results) || results[index].StepName != e.steps[index].Name() || results[index].Status != types.StepStatusPending {
 			return e.failRun(run, repo, fmt.Errorf("recovered step plan changed at %d", index))
 		}
+		if err := e.refuseSkippedPRWithClosingIssues(run, repo, e.steps[index].Name(), results[index].ID); err != nil {
+			return e.failRun(run, repo, err)
+		}
 		if err := e.db.CompleteStepWithStatus(results[index].ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
 			return e.failRun(run, repo, fmt.Errorf("skip recovered step %s: %w", e.steps[index].Name(), err))
 		}
@@ -829,6 +825,28 @@ func (e *Executor) skipRecoveredRemainder(run *db.Run, repo *db.Repo, start int)
 		return e.failRun(run, repo, fmt.Errorf("complete recovered run: %w", err))
 	}
 	return nil
+}
+
+// refuseSkippedPRWithClosingIssues fails a PR step the executor would mark
+// skipped without running it while the run carries --closes references:
+// nothing would publish them. The claim makes a concurrent reattach fail
+// closed too.
+func (e *Executor) refuseSkippedPRWithClosingIssues(run *db.Run, repo *db.Repo, name types.StepName, stepResultID string) error {
+	if name != types.StepPR {
+		return nil
+	}
+	refs, err := e.db.ClaimClosingIssueRefsForPRBody(run.ID)
+	if err == nil && len(refs) > 0 {
+		err = fmt.Errorf("render closing issues: --closes requires publishing a pull request, but the pr step is skipped; close the issue manually, or rerun without --closes when the changes are already in the base branch")
+	}
+	if err == nil {
+		return nil
+	}
+	if dbErr := e.db.FailStep(stepResultID, err.Error(), 0); dbErr != nil {
+		slog.Warn("failed to mark step as failed in db", "step", name, "error", dbErr)
+	}
+	e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, name, string(types.StepStatusFailed), "", err.Error(), nil)
+	return fmt.Errorf("step %s failed: %s", name, err)
 }
 
 func recoveredStepDuration(step *db.StepResult) int64 {
