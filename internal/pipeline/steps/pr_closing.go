@@ -64,7 +64,8 @@ var closingReferenceInTextPattern = regexp.MustCompile(`(?i)\b((?:close|closes|c
 
 // neutralizeClosingReferences puts every closing-keyword reference in
 // pipeline-generated PR text, including an issue or pull request URL, in an
-// inline code span ("Fixes `#12`"), outside fenced, indented, and inline code.
+// inline code span ("Fixes `#12`"), outside fenced, indented, and inline code
+// and HTML <code>/<pre> elements (a tested command renders as <code>).
 // GitHub ignores a reference in code, so nothing the pipeline publishes can
 // close an issue; only the Issues section carries live ones.
 func neutralizeClosingReferences(s string) string {
@@ -73,6 +74,7 @@ func neutralizeClosingReferences(s string) string {
 	}
 	lines := strings.Split(s, "\n")
 	var fence markdownFence
+	var htmlCode string
 	for i, raw := range lines {
 		inFence := fence.marker != 0
 		fence.consume(raw)
@@ -80,10 +82,44 @@ func neutralizeClosingReferences(s string) string {
 			continue
 		}
 		lines[i] = outsideInlineCode(raw, func(text string) string {
-			return closingReferenceInTextPattern.ReplaceAllString(text, "${1}`${2}`")
+			return outsideHTMLCode(text, &htmlCode, func(text string) string {
+				return closingReferenceInTextPattern.ReplaceAllString(text, "${1}`${2}`")
+			})
 		})
 	}
 	return strings.Join(lines, "\n")
+}
+
+var htmlCodeTagPattern = regexp.MustCompile(`(?i)<(/?)(code|pre)\b[^>]*>`)
+
+// outsideHTMLCode applies rewrite to the parts of text outside HTML <code>
+// and <pre> elements. open names the element still open from earlier text
+// ("" when none), so an element may span lines.
+func outsideHTMLCode(text string, open *string, rewrite func(string) string) string {
+	var b strings.Builder
+	last := 0
+	for _, m := range htmlCodeTagPattern.FindAllStringSubmatchIndex(text, -1) {
+		closing := m[3] > m[2]
+		name := strings.ToLower(text[m[4]:m[5]])
+		switch {
+		case *open == "" && !closing:
+			b.WriteString(rewrite(text[last:m[0]]))
+			*open = name
+		case *open == name && closing:
+			b.WriteString(text[last:m[0]])
+			*open = ""
+		default:
+			continue
+		}
+		b.WriteString(text[m[0]:m[1]])
+		last = m[1]
+	}
+	if *open == "" {
+		b.WriteString(rewrite(text[last:]))
+	} else {
+		b.WriteString(text[last:])
+	}
+	return b.String()
 }
 
 // outsideInlineCode applies rewrite to the parts of line outside inline code

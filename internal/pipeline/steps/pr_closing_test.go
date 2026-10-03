@@ -130,6 +130,21 @@ func TestNeutralizeClosingReferencesURLForm(t *testing.T) {
 	}
 }
 
+// A tested command containing backticks renders as an HTML <code> element; it
+// must be published exactly as recorded, while prose around it is neutralized.
+func TestNeutralizeClosingReferencesLeavesHTMLCodeUnchanged(t *testing.T) {
+	t.Parallel()
+	rendered := renderTestedDetailFor("git commit -m \"`Fixes #12`\" && echo Fixes #12", prBodyHTML)
+	if !strings.HasPrefix(rendered, "<code>") {
+		t.Fatalf("tested command did not render as HTML code: %q", rendered)
+	}
+	in := "Fixes #3 via " + rendered + " then fixes #4\n<pre>\nCloses #5\n</pre>\nresolves #6"
+	want := "Fixes `#3` via " + rendered + " then fixes `#4`\n<pre>\nCloses #5\n</pre>\nresolves `#6`"
+	if got := neutralizeAttestationMarkers(in); got != want {
+		t.Fatalf("neutralizeAttestationMarkers = %q, want %q", got, want)
+	}
+}
+
 // pr.template bodies keep author text verbatim, so the requested reference
 // lives in the regenerated appendix, and is not repeated once the author's
 // own text closes the same issue.
