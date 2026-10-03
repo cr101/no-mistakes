@@ -266,6 +266,19 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 
 		sr := stepRecords[step.Name()]
 		if e.skips[step.Name()] {
+			if step.Name() == types.StepPR {
+				refs, err := e.db.ClaimClosingIssueRefsForPRBody(run.ID)
+				if err == nil && len(refs) > 0 {
+					err = fmt.Errorf("render closing issues: --closes requires publishing a pull request, but PR creation is unavailable: the pr step is skipped")
+				}
+				if err != nil {
+					if dbErr := e.db.FailStep(sr.ID, err.Error(), 0); dbErr != nil {
+						slog.Warn("failed to mark step as failed in db", "step", step.Name(), "error", dbErr)
+					}
+					e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, step.Name(), string(types.StepStatusFailed), "", err.Error(), nil)
+					return e.failRun(run, repo, fmt.Errorf("step %s failed: %s", step.Name(), err), ctx)
+				}
+			}
 			if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
 				return e.failRun(run, repo, fmt.Errorf("skip step %s: %w", step.Name(), err), ctx)
 			}
