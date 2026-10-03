@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -168,10 +169,11 @@ func newAxiRunCmd() *cobra.Command {
 			"--closes <issue> adds a GitHub closing reference (Closes #42) to the PR\n" +
 			"body's Issues section. Repeat it for each issue the PR fully resolves; a\n" +
 			"value is an issue number or owner/repo#42. References are deduplicated,\n" +
-			"persisted on the run, kept through every PR-body refresh and verified on the\n" +
-			"live PR. Without it no closing reference is added or inferred. GitHub closes\n" +
-			"the issue only when the PR merges into the default branch. Reattaching may\n" +
-			"add references until the PR body has been composed.\n\n" +
+			"kept through that run's PR-body refreshes, inherited by rerun, and verified\n" +
+			"on the live PR; a later run started without --closes drops them. Without it\n" +
+			"no closing reference is added or inferred. GitHub closes the issue only when\n" +
+			"the PR merges into the default branch. Reattaching may add references until\n" +
+			"the PR body has been composed. It cannot be combined with --skip pr.\n\n" +
 			"--model and/or --effort opt into an immutable Pi profile for a new run.\n" +
 			"An omitted field comes from agent_config.pi; both must resolve. Requires\n" +
 			"Pi-only agents; raw native selection flags conflict. The pin outranks\n" +
@@ -252,6 +254,9 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 	closesIssues, err := closingIssueRefsFromFlags(cmd)
 	if err != nil {
 		return emitError(cmd, 2, err.Error(), "Use a positive issue number or owner/repository-qualified reference, e.g. --closes 42 --closes owner/repo#99.")
+	}
+	if len(closesIssues) > 0 && slices.Contains(skipSteps, types.StepPR) {
+		return emitError(cmd, 2, "--closes cannot be combined with --skip pr: skipping the PR step publishes no closing reference", "Drop pr from --skip, or drop --closes.")
 	}
 	ctx := cmd.Context()
 	driveCtx, cancel, err := boundAxiWait(ctx, wait)

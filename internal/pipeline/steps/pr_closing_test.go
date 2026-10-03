@@ -226,6 +226,9 @@ func TestPRStep_ClosesFailsInsteadOfSkippingWhenHostUnavailable(t *testing.T) {
 		{"no host", func(_ *testing.T, sctx *pipeline.StepContext) {
 			sctx.Repo.UpstreamURL = "https://bitbucket.org/test/repo.git"
 		}},
+		{"base branch", func(_ *testing.T, sctx *pipeline.StepContext) {
+			sctx.Run.Branch = effectivePRBaseBranch(sctx)
+		}},
 	} {
 		for _, refs := range [][]string{nil, {"42"}} {
 			t.Run(fmt.Sprintf("%s/closes=%v", tc.name, refs), func(t *testing.T) {

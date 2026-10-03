@@ -77,6 +77,9 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	}
 	baseBranch := effectivePRBaseBranch(sctx)
 	if branch == baseBranch {
+		if err := refuseSkipWithClosingIssues(sctx, fmt.Sprintf("the branch is the PR base branch %s", branch)); err != nil {
+			return nil, err
+		}
 		sctx.Log(fmt.Sprintf("skipping PR creation on base branch %s", branch))
 		return &pipeline.StepOutcome{Skipped: true}, nil
 	}
