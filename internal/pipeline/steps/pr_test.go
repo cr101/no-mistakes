@@ -502,7 +502,7 @@ func TestPRStep_OrdinaryUpdateRendersRequestedIssuesOnce(t *testing.T) {
 	}
 
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Env = append(env, "FAKE_CLI_PR_CLOSING_ISSUES=owner/repo#7,test/repo#42")
+	sctx.Env = env
 	if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, []string{"99", "42", "owner/repo#7"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1706,7 +1706,7 @@ func TestBuildPRBody_TrimsOversizedLaterSectionWithoutDroppingSmallEssentials(t 
 }
 
 func TestAssembleDraftPRBody_GitHubKeepsIssuesWithinTheByteBudget(t *testing.T) {
-	sctx := newTestContext(t, &mockAgent{name: "test"}, t.TempDir(), "", "", config.Commands{})
+	sctx, host := fakeGitHubRenderer(t)
 	sctx.ClosingIssueRefs = []string{"42"}
 	body := "## What Changed\n\n- essential summary survives\n\n" + strings.Repeat("x", maxPullRequestBodyBytes)
 
@@ -1716,13 +1716,13 @@ func TestAssembleDraftPRBody_GitHubKeepsIssuesWithinTheByteBudget(t *testing.T) 
 	if !strings.HasSuffix(got, "## Issues\n\nCloses #42") {
 		t.Fatalf("Issues section missing or not last (len %d)", len(got))
 	}
-	sealed, err := sealClosingLedger(sctx, scm.ProviderGitHub, got)
+	sealed, err := sealClosingLedger(context.Background(), sctx, host, scm.ProviderGitHub, got)
 	if err != nil {
 		t.Fatalf("the ledger must fit the room reserved for it: %v", err)
 	}
 	assertGitHubBodyLimitForTest(t, sealed)
-	if lines, ok := parseClosingLedger(sealed); !ok || strings.Join(lines, "|") != "Closes #42" {
-		t.Fatalf("ledger = %q, %v", lines, ok)
+	if targets, ok := parseClosingLedger(sealed); !ok || strings.Join(targets, "|") != "42" {
+		t.Fatalf("ledger = %q, %v", targets, ok)
 	}
 }
 

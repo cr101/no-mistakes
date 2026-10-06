@@ -803,28 +803,31 @@ func TestGetPRContentReadsTitleAndBody(t *testing.T) {
 	}
 }
 
-func TestGetClosingIssuesReadsGitHubsReferences(t *testing.T) {
+func TestRenderMarkdownPostsTheBodyInTheRepositoryContext(t *testing.T) {
 	t.Parallel()
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr view 42 --repo test/repo --json closingIssuesReferences": {stdout: `{"closingIssuesReferences":[{"number":4,"repository":{"name":"repo","owner":{"login":"test"}}},{"number":7,"repository":{"name":"other","owner":{"login":"owner"}}}]}` + "\n"},
-	}), nil, "", "test/repo")
+		"gh api --hostname ghe.example.com --method POST markdown --input -": {
+			wantStdin: `{"context":"test/repo","mode":"gfm","text":"Closes #4\n- x"}`,
+			stdout:    "<p>Closes #4</p>\n",
+		},
+	}), nil, "ghe.example.com", "ghe.example.com/test/repo")
 
-	got, err := host.GetClosingIssues(context.Background(), &scm.PR{Number: "42"})
+	got, err := host.RenderMarkdown(context.Background(), "Closes #4\n- x")
 	if err != nil {
-		t.Fatalf("GetClosingIssues() error = %v", err)
+		t.Fatalf("RenderMarkdown() error = %v", err)
 	}
-	if strings.Join(got, ",") != "test/repo#4,owner/other#7" {
-		t.Fatalf("GetClosingIssues() = %q", got)
+	if got != "<p>Closes #4</p>\n" {
+		t.Fatalf("RenderMarkdown() = %q", got)
 	}
 }
 
-func TestGetClosingIssuesFailsClosedOnMissingField(t *testing.T) {
+func TestRenderMarkdownFailsClosed(t *testing.T) {
 	t.Parallel()
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr view 42 --repo test/repo --json closingIssuesReferences": {stdout: "{}\n"},
+		"gh api --method POST markdown --input -": {stderr: "HTTP 502", code: 1},
 	}), nil, "", "test/repo")
-	if _, err := host.GetClosingIssues(context.Background(), &scm.PR{Number: "42"}); err == nil {
-		t.Fatal("GetClosingIssues() without closingIssuesReferences: expected error, got nil")
+	if _, err := host.RenderMarkdown(context.Background(), "Closes #4"); err == nil {
+		t.Fatal("RenderMarkdown() on a failed call: expected error, got nil")
 	}
 }
 

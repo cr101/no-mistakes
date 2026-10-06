@@ -19,9 +19,6 @@ type prStepRuns struct {
 	t        *testing.T
 	sctx     *pipeline.StepContext
 	bodyFile string
-	// githubEnv is what the fake GitHub reports about the live body on the
-	// next update (FAKE_CLI_PR_CLOSING_ISSUES and its error knob).
-	githubEnv []string
 }
 
 func newPRStepRuns(t *testing.T, ag *mockAgent) *prStepRuns {
@@ -47,29 +44,17 @@ func (r *prStepRuns) create(refs ...string) string {
 
 func (r *prStepRuns) update(refs ...string) string {
 	r.t.Helper()
-	if err := r.tryUpdate(refs...); err != nil {
-		r.t.Fatalf("update: %v", err)
-	}
-	return readPRBodyFile(r.t, r.bodyFile)
-}
-
-func (r *prStepRuns) tryUpdate(refs ...string) error {
-	r.t.Helper()
 	env, _ := fakeGH(r.t, "https://github.com/test/repo/pull/99")
-	r.sctx.Env = append(append(env, "FAKE_CLI_PR_BODY_FILE="+r.bodyFile), r.githubEnv...)
+	r.sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+r.bodyFile)
 	// A later run is a new run: nothing it inherits from the PR step's own
 	// in-memory state.
 	r.sctx.ClosingIssueRefs = nil
 	r.sctx.CarriedClosingLines = nil
 	r.setRefs(refs)
-	_, err := (&PRStep{}).Execute(r.sctx)
-	return err
-}
-
-// githubCloses sets what GitHub reports the live body closes
-// (owner/repository#number) from now on.
-func (r *prStepRuns) githubCloses(refs ...string) {
-	r.githubEnv = []string{"FAKE_CLI_PR_CLOSING_ISSUES=" + strings.Join(refs, ",")}
+	if _, err := (&PRStep{}).Execute(r.sctx); err != nil {
+		r.t.Fatalf("update: %v", err)
+	}
+	return readPRBodyFile(r.t, r.bodyFile)
 }
 
 func (r *prStepRuns) setRefs(refs []string) {
@@ -100,7 +85,9 @@ func closingLinesOf(body string) string {
 }
 
 // Issue #763: an author's closing line added to a body the pipeline published
-// survives the next ordinary update instead of being stripped.
+// survives the next ordinary update instead of being stripped, and keeps
+// surviving later ones because carried lines are not recorded as the
+// pipeline's own.
 func TestPRStep_KeepsAuthorClosingLineAddedToPipelineBody(t *testing.T) {
 	t.Parallel()
 	runs := newPRStepRuns(t, nil)
@@ -109,7 +96,6 @@ func TestPRStep_KeepsAuthorClosingLineAddedToPipelineBody(t *testing.T) {
 		t.Fatalf("a published ordinary body must carry the closing ledger:\n%s", created)
 	}
 	runs.authorEdits(created + "\n\nCloses owner/repo#7\n")
-	runs.githubCloses("owner/repo#7")
 
 	updated := runs.update()
 	if got := closingLinesOf(updated); got != "Closes owner/repo#7" {
@@ -119,8 +105,6 @@ func TestPRStep_KeepsAuthorClosingLineAddedToPipelineBody(t *testing.T) {
 		t.Fatalf("the author's line must be carried into the Issues section:\n%s", updated)
 	}
 
-	// It keeps surviving later updates too: carried lines are not recorded as
-	// the pipeline's own.
 	again := runs.update()
 	if got := closingLinesOf(again); got != "Closes owner/repo#7" {
 		t.Fatalf("after a second update closing lines = %q:\n%s", got, again)
@@ -138,28 +122,10 @@ func TestPRStep_DropsPipelineClosesLinesButKeepsAuthorLines(t *testing.T) {
 		t.Fatalf("created closing lines = %q", got)
 	}
 	runs.authorEdits(created + "\n\nFixes #42\n")
-	runs.githubCloses("test/repo#95", "test/repo#42")
 
 	updated := runs.update()
 	if got := closingLinesOf(updated); got != "Fixes #42" {
 		t.Fatalf("closing lines = %q, want only the author's line after a run without --closes:\n%s", got, updated)
-	}
-}
-
-// A body an older no-mistakes published (signature/attestation, no ledger)
-// may carry live closing lines in its generated sections. They are not the
-// author's, so nothing is carried, exactly as before.
-func TestPRStep_LegacyPipelineBodyCarriesNothing(t *testing.T) {
-	t.Parallel()
-	runs := newPRStepRuns(t, nil)
-	runs.create()
-	// What an older no-mistakes published: intent verbatim, no ledger.
-	legacy := "## Intent\n\nRefactor X\nFixes #12\n\n## What Changed\n\n- refactor\n\n## Pipeline\n\n" + noMistakesPRSignature + "\n"
-	runs.authorEdits(legacy)
-
-	updated := runs.update()
-	if got := closingLinesOf(updated); got != "" {
-		t.Fatalf("closing lines = %q, want none carried from a legacy pipeline body:\n%s", got, updated)
 	}
 }
 
@@ -183,7 +149,6 @@ func TestPRStep_CarriedLinesFollowAuthorEditsDuringDrafting(t *testing.T) {
 	runs = newPRStepRuns(t, ag)
 	created := runs.create()
 	runs.authorEdits(created + "\n\nFixes #42\n")
-	runs.githubCloses("test/repo#42", "test/repo#7")
 
 	drafting = true
 	updated := runs.update()
@@ -192,23 +157,118 @@ func TestPRStep_CarriedLinesFollowAuthorEditsDuringDrafting(t *testing.T) {
 	}
 }
 
-// Copies of the ledger in pipeline-generated text (a quoted PR body in Test
-// evidence) are escaped, and an ambiguous ledger carries nothing.
-func TestClosingLedgerIsOnlyTheOneThePipelineAppends(t *testing.T) {
-	quoted := neutralizeAttestationMarkers("evidence:\n" + renderClosingLedger([]string{"Closes #1"}))
-	if closingLedgerMarkerPattern.MatchString(quoted) {
-		t.Fatalf("generated text must not carry a parseable ledger: %q", quoted)
-	}
-	body := "Fixes #3\n\n" + renderClosingLedger(nil) + "\n" + renderClosingLedger([]string{"Fixes #3"})
-	if _, ok := parseClosingLedger(body); ok {
-		t.Fatal("two ledgers must not parse")
-	}
-	if got := authorClosingLines(body); got != nil {
-		t.Fatalf("ambiguous ledger carried %q", got)
+// fakeGitHubRenderer returns a step context and the GitHub host the PR step
+// would build for it, rendering through the fake gh (internal/fakegfm).
+func fakeGitHubRenderer(t *testing.T, env ...string) (*pipeline.StepContext, scm.Host) {
+	t.Helper()
+	sctx := newTestContext(t, &mockAgent{name: "test"}, t.TempDir(), "", "", config.Commands{})
+	fake, _ := fakeGH(t, "")
+	sctx.Env = append(fake, env...)
+	host, _ := buildHost(sctx, scm.ProviderGitHub)
+	return sctx, host
+}
+
+// Which live closing references are the author's is decided by GitHub's
+// renderer on the live body, counted per target against the ledger.
+func TestCarriedClosingLines(t *testing.T) {
+	t.Parallel()
+	sctx, host := fakeGitHubRenderer(t)
+	ledger := func(targets ...string) string { return "\n\n" + renderClosingLedger(targets) }
+	for name, tc := range map[string]struct {
+		body string
+		want string
+	}{
+		// Greptile: a commented-out copy does not use up the pipeline's
+		// ledger entry, so a run without --closes drops #5.
+		"commented-out copy of a pipeline line": {
+			body: "<!--\nCloses #5\n-->\n\n## Issues\n\nCloses #5" + ledger("5"),
+		},
+		"author copy of a pipeline line": {
+			body: "Closes #5\n\n## Issues\n\nCloses #5" + ledger("5"),
+			want: "Closes #5",
+		},
+		"stray inline comment marker": {
+			body: "Drops stray <!-- markers\n\nCloses #4" + ledger(),
+			want: "Closes #4",
+		},
+		"comment, pre, and code author lines": {
+			body: "<!--\nCloses #5\n-->\n\n<pre>\nFixes #9\n</pre>\n\n<code>Fixes #2</code>\n\n`Fixes #3`" + ledger(),
+		},
+		"reference in prose": {
+			body: "This also fixes #8 for good." + ledger(),
+			want: "Closes #8",
+		},
+		"hand-opened template comment": {
+			body: "<!--\nFixes #123\n-->\n\nSummary.\n\nResolves test/repo#44\n",
+			want: "Resolves test/repo#44",
+		},
+		"legacy pipeline body without a ledger": {
+			body: "## Intent\n\nFixes #12\n\n## Pipeline\n\n" + noMistakesPRSignature + "\n",
+		},
+		"ambiguous ledger": {
+			body: "Fixes #3" + ledger() + ledger("3"),
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got, err := carriedClosingLines(context.Background(), sctx, host, tc.body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Join(got, "|") != tc.want {
+				t.Fatalf("carried = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
-// Only GitHub reports which issues a body closes, so no other forge gets a
+// The ledger records exactly what renders live, minus the carried author
+// lines, so a pipeline reference that escaped neutralization is dropped by
+// the next run while the author's line is carried again.
+func TestSealClosingLedgerRecordsWhatRendersLive(t *testing.T) {
+	t.Parallel()
+	sctx, host := fakeGitHubRenderer(t)
+	sctx.CarriedClosingLines = []string{"Closes owner/repo#7"}
+	body := "## Intent\n\n<pre>\nFixes #12\n</pre>\nFixes #3\n\n## Issues\n\nCloses owner/repo#7\nCloses #5"
+
+	sealed, err := sealClosingLedger(context.Background(), sctx, host, scm.ProviderGitHub, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if targets, ok := parseClosingLedger(sealed); !ok || strings.Join(targets, "|") != "3|5" {
+		t.Fatalf("ledger = %q, %v; want the pipeline's live #3 and #5 only", targets, ok)
+	}
+	carried, err := carriedClosingLines(context.Background(), sctx, host, sealed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(carried, "|") != "Closes owner/repo#7" {
+		t.Fatalf("carried = %q, want only the author's line", carried)
+	}
+}
+
+// A failed render fails closed on both sides rather than guessing.
+func TestClosingLinesFailClosedWhenRenderingFails(t *testing.T) {
+	t.Parallel()
+	sctx, host := fakeGitHubRenderer(t, "FAKE_CLI_MARKDOWN_ERR=HTTP 502")
+	if _, err := carriedClosingLines(context.Background(), sctx, host, "Closes #4\n"); err == nil || !strings.Contains(err.Error(), "render the pull request body") {
+		t.Fatalf("carry error = %v, want a render failure", err)
+	}
+	if _, err := sealClosingLedger(context.Background(), sctx, host, scm.ProviderGitHub, "## Issues\n\nCloses #4"); err == nil {
+		t.Fatal("sealing without a render must fail")
+	}
+}
+
+// Copies of the ledger in pipeline-generated text (a quoted PR body in Test
+// evidence) are escaped, so only the ledger the pipeline appends parses.
+func TestClosingLedgerIsOnlyTheOneThePipelineAppends(t *testing.T) {
+	quoted := neutralizeAttestationMarkers("evidence:\n" + renderClosingLedger([]string{"1"}))
+	if closingLedgerMarkerPattern.MatchString(quoted) {
+		t.Fatalf("generated text must not carry a parseable ledger: %q", quoted)
+	}
+}
+
+// Only GitHub's renderer decides what is live, so no other forge gets a
 // ledger or carries anything.
 func TestNoLedgerOffGitHub(t *testing.T) {
 	sctx := &pipeline.StepContext{ClosingIssueRefs: []string{"5"}}
@@ -217,7 +277,7 @@ func TestNoLedgerOffGitHub(t *testing.T) {
 		if carriesClosingLines(provider) {
 			t.Fatalf("%s must not carry closing lines", provider)
 		}
-		if got, err := sealClosingLedger(sctx, provider, body); err != nil || got != body {
+		if got, err := sealClosingLedger(context.Background(), sctx, nil, provider, body); err != nil || got != body {
 			t.Fatalf("%s sealed body = %q, %v; want it unchanged", provider, got, err)
 		}
 	}
@@ -226,120 +286,7 @@ func TestNoLedgerOffGitHub(t *testing.T) {
 // A body too large for the ledger fails closed instead of publishing without it.
 func TestSealClosingLedgerFailsClosedOverTheSizeCap(t *testing.T) {
 	sctx := &pipeline.StepContext{}
-	if _, err := sealClosingLedger(sctx, scm.ProviderGitHub, strings.Repeat("x", maxPullRequestBodyBytes)); err == nil {
+	if _, err := sealClosingLedger(context.Background(), sctx, nil, scm.ProviderGitHub, strings.Repeat("x", maxPullRequestBodyBytes)); err == nil {
 		t.Fatal("a body without room for the ledger must fail")
-	}
-}
-
-// Pipeline text the extractor reads as a closing line, whatever construct it
-// sits in, is recorded in the ledger when published, so a later update never
-// carries it as the author's.
-func TestPRStep_PipelineClosingLinesAreLedgeredNotCarried(t *testing.T) {
-	for name, intent := range map[string]string{
-		"pre element":                 "Refactor X\n<pre>\nFixes #12\n</pre>",
-		"unterminated inline comment": "Drops stray <!-- markers\nFixes #12",
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			runs := newPRStepRuns(t, nil)
-			runs.sctx.UserIntent = intent
-			created := runs.create()
-			if lines, ok := parseClosingLedger(created); !ok || len(lines) != len(extractClosingKeywordLines(created)) {
-				t.Fatalf("ledger = %q, %v; want every published closing line:\n%s", lines, ok, created)
-			}
-
-			updated := runs.update()
-			if strings.Contains(updated, "## Issues") {
-				t.Fatalf("an update must carry nothing from pipeline text:\n%s", updated)
-			}
-			if got := authorClosingLines(updated); got != nil {
-				t.Fatalf("author closing lines = %q, want none", got)
-			}
-		})
-	}
-}
-
-// Greptile ci-2: an unterminated inline `<!--` in the live body does not hide
-// a later author line GitHub reports as closing; it is carried, and a
-// requested reference still verifies.
-func TestPRStep_StrayCommentMarkerDoesNotHideAuthorClosingLine(t *testing.T) {
-	t.Parallel()
-	runs := newPRStepRuns(t, nil)
-	created := runs.create()
-	runs.authorEdits("Drops stray <!-- markers\n\nCloses #4\n\n" + created)
-	runs.githubCloses("test/repo#4")
-
-	updated := runs.update("9")
-	if !strings.Contains(updated, "## Issues\n\nCloses #4\nCloses #9") {
-		t.Fatalf("Issues section must carry the author's line and add the requested one:\n%s", updated)
-	}
-}
-
-// An author line GitHub does not report as closing (commented out, or inside
-// a <pre> element) is not carried; one it does report is.
-func TestPRStep_AuthorLineGitHubDoesNotCloseIsNotCarried(t *testing.T) {
-	t.Parallel()
-	runs := newPRStepRuns(t, nil)
-	created := runs.create()
-	runs.authorEdits(created + "\n\n<!--\nCloses #5\n-->\n\n<pre>\nFixes #9\n</pre>\n\nCloses #4\n")
-	runs.githubCloses("test/repo#4")
-
-	updated := runs.update()
-	if got := closingLinesOf(updated); got != "Closes #4" {
-		t.Fatalf("closing lines = %q, want only the line GitHub closes carried:\n%s", got, updated)
-	}
-}
-
-// A body the pipeline never published (a hand-opened PR from a template with
-// a commented-out example) carries only what GitHub reports as closing.
-func TestPRStep_HandOpenedTemplateCommentIsNotCarried(t *testing.T) {
-	t.Parallel()
-	runs := newPRStepRuns(t, nil)
-	runs.create()
-	runs.authorEdits("<!--\nFixes #123\n-->\n\nSummary of the change.\n")
-	runs.githubCloses()
-
-	updated := runs.update()
-	if strings.Contains(updated, "## Issues") {
-		t.Fatalf("nothing GitHub does not close may be carried:\n%s", updated)
-	}
-}
-
-// Greptile ci-1: the ledger is matched by occurrence count, so an author's
-// own copy of a line the pipeline published for --closes is kept once, and a
-// carried line is not recorded as the pipeline's.
-func TestPRStep_AuthorCopyOfPipelineClosesLineIsKept(t *testing.T) {
-	t.Parallel()
-	runs := newPRStepRuns(t, nil)
-	created := runs.create("5")
-	if lines, ok := parseClosingLedger(created); !ok || strings.Join(lines, "|") != "Closes #5" {
-		t.Fatalf("ledger = %q, %v", lines, ok)
-	}
-	runs.authorEdits("Closes #5\n\n" + created)
-	runs.githubCloses("test/repo#5")
-
-	updated := runs.update()
-	if got := len(closingKeywordLineOccurrences(updated)); got != 1 || closingLinesOf(updated) != "Closes #5" {
-		t.Fatalf("want exactly one Closes #5 (the author's), got %d:\n%s", got, updated)
-	}
-	if lines, ok := parseClosingLedger(updated); !ok || len(lines) != 0 {
-		t.Fatalf("ledger = %q, %v; the carried line must not be recorded", lines, ok)
-	}
-}
-
-// A failed closing-issues lookup fails the step rather than guessing.
-func TestPRStep_ClosingIssuesLookupFailureFailsClosed(t *testing.T) {
-	t.Parallel()
-	runs := newPRStepRuns(t, nil)
-	created := runs.create()
-	runs.authorEdits(created + "\n\nCloses #4\n")
-	runs.githubEnv = []string{"FAKE_CLI_PR_CLOSING_ISSUES_ERR=graphql: rate limited"}
-
-	err := runs.tryUpdate()
-	if err == nil || !strings.Contains(err.Error(), "issues the pull request closes") {
-		t.Fatalf("update error = %v, want a closing-issues lookup failure", err)
-	}
-	if got := readPRBodyFile(t, runs.bodyFile); got != created+"\n\nCloses #4\n" {
-		t.Fatalf("a failed lookup must not rewrite the body:\n%s", got)
 	}
 }

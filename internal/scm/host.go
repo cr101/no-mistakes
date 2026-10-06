@@ -349,11 +349,10 @@ type PRContentReader interface {
 	GetPRContent(ctx context.Context, pr *PR) (PRContent, error)
 }
 
-// ClosingIssuesReader is an optional interface for hosts that report which
-// issues the live PR body closes on merge, by the forge's own judgement. Each
-// reference is "owner/repository#number".
-type ClosingIssuesReader interface {
-	GetClosingIssues(ctx context.Context, pr *PR) ([]string, error)
+// MarkdownRenderer is an optional interface for hosts that render Markdown to
+// HTML with the forge's own renderer, in the context of the PR's repository.
+type MarkdownRenderer interface {
+	RenderMarkdown(ctx context.Context, text string) (string, error)
 }
 
 // MergedProof is provider evidence that a specific PR head was merged.

@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/closingissues"
@@ -23,16 +25,15 @@ import (
 // closing references neutralized (neutralizeClosingReferences).
 //
 // An ordinary update replaces the whole body, so it carries the AUTHOR's own
-// standalone closing lines over into the Issues section
-// (sctx.CarriedClosingLines) instead of dropping them (issue #763). Which
-// lines are the author's is never guessed from headings: the body records
-// every closing line the pipeline itself published (the --closes lines and
-// anything its own text left that the extractor reads as a closing line) in a
-// hidden ledger comment (closingLedgerPrefix, sealClosingLedger), so every
-// closing-line occurrence beyond those in a body carrying that ledger
-// appeared after publication and is the author's. See authorClosingLines for
-// bodies without a ledger. Whether such a line is live is left to GitHub
-// (carriedClosingLines), so carry-over is GitHub-only.
+// closing references over into the Issues section (sctx.CarriedClosingLines)
+// instead of dropping them (issue #763). What is live is never guessed from
+// Markdown or HTML structure, and whose it is never from headings: the
+// published body and the live one are both rendered by GitHub's own Markdown
+// renderer (renderedClosingTargets), and the published body records every
+// live closing reference the pipeline itself published in a hidden ledger
+// comment (closingLedgerPrefix, sealClosingLedger). A live reference in a
+// later body beyond those it records is the author's (carriedClosingLines).
+// Carry-over is therefore GitHub-only.
 
 const issuesSectionHeading = "## Issues"
 
@@ -50,27 +51,7 @@ var closingReferencePattern = regexp.MustCompile(`(?i)(?:[A-Za-z0-9-]+/[A-Za-z0-
 // extractClosingKeywordLines returns the distinct standalone closing-keyword
 // lines of body, outside fenced and indented code blocks.
 func extractClosingKeywordLines(body string) []string {
-	return distinctClosingLines(closingKeywordLineOccurrences(body))
-}
-
-// distinctClosingLines drops case-insensitive repeats, keeping first order.
-func distinctClosingLines(occurrences []string) []string {
 	seen := map[string]struct{}{}
-	var lines []string
-	for _, line := range occurrences {
-		key := strings.ToLower(line)
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
-		lines = append(lines, line)
-	}
-	return lines
-}
-
-// closingKeywordLineOccurrences returns every standalone closing-keyword line
-// of body, duplicates included, outside fenced and indented code blocks.
-func closingKeywordLineOccurrences(body string) []string {
 	var lines []string
 	var fence markdownFence
 	for _, raw := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
@@ -80,9 +61,15 @@ func closingKeywordLineOccurrences(body string) []string {
 			continue
 		}
 		line := strings.TrimSpace(raw)
-		if closingKeywordLinePattern.MatchString(line) {
-			lines = append(lines, line)
+		if !closingKeywordLinePattern.MatchString(line) {
+			continue
 		}
+		key := strings.ToLower(line)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		lines = append(lines, line)
 	}
 	return lines
 }
@@ -199,11 +186,17 @@ func closingTargets(lines []string, repo string) map[string]struct{} {
 	targets := map[string]struct{}{}
 	for _, line := range lines {
 		for _, target := range closingReferencePattern.FindAllString(line, -1) {
-			target = closingissues.Localize(strings.TrimPrefix(target, "#"), repo)
-			targets[strings.ToLower(target)] = struct{}{}
+			targets[closingTargetKey(target, repo)] = struct{}{}
 		}
 	}
 	return targets
+}
+
+// closingTargetKey is the canonical, case-folded form of a reference target
+// ("#42" -> "42", "owner/repo#42"), with the PR's own repository written as
+// the bare number.
+func closingTargetKey(target, repo string) string {
+	return strings.ToLower(closingissues.Localize(strings.TrimPrefix(target, "#"), repo))
 }
 
 // prRepository returns the owner/repository the PR lives in, or "" when it
@@ -262,10 +255,11 @@ func issuesSection(sctx *pipeline.StepContext, authorText string) string {
 	return renderIssuesSection(requestedClosingLines(sctx, extractClosingKeywordLines(authorText)))
 }
 
-// closingLedgerPrefix opens the hidden record of every closing line an
-// ordinary body was published with, except carried author lines. It is pipeline
-// bookkeeping, not evidence of authorship: it only lets the next ordinary
-// update tell those lines apart from closing lines the author added.
+// closingLedgerPrefix opens the hidden record of the live closing references
+// an ordinary body was published with, except those of carried author lines:
+// one closingTargetKey per occurrence. It is pipeline bookkeeping, not
+// evidence of authorship: it only lets the next ordinary update tell those
+// references apart from ones the author added.
 const (
 	closingLedgerPrefix = "<!-- no-mistakes-closing-lines:v1 "
 	closingLedgerSuffix = " -->"
@@ -283,17 +277,17 @@ func escapeClosingLedgerMarkers(s string) string {
 	})
 }
 
-func renderClosingLedger(lines []string) string {
-	if lines == nil {
-		lines = []string{}
+func renderClosingLedger(targets []string) string {
+	if targets == nil {
+		targets = []string{}
 	}
-	data, _ := json.Marshal(lines)
+	data, _ := json.Marshal(targets)
 	return closingLedgerPrefix + string(data) + closingLedgerSuffix
 }
 
-// parseClosingLedger returns the lines recorded by the body's ledger. ok is
+// parseClosingLedger returns the targets recorded by the body's ledger. ok is
 // false unless exactly one well-formed ledger is present.
-func parseClosingLedger(body string) (lines []string, ok bool) {
+func parseClosingLedger(body string) (targets []string, ok bool) {
 	if len(closingLedgerMarkerPattern.FindAllStringIndex(body, -1)) != 1 {
 		return nil, false
 	}
@@ -303,88 +297,111 @@ func parseClosingLedger(body string) (lines []string, ok bool) {
 	}
 	rest := body[start+len(closingLedgerPrefix):]
 	end := strings.Index(rest, closingLedgerSuffix)
-	if end < 0 || json.Unmarshal([]byte(rest[:end]), &lines) != nil {
+	if end < 0 || json.Unmarshal([]byte(rest[:end]), &targets) != nil {
 		return nil, false
 	}
-	return lines, true
+	return targets, true
 }
 
-// authorClosingLines returns the distinct standalone closing lines of a live
-// ordinary body that are the author's candidates for carrying, for an update
-// about to replace that body:
-//   - a body with a ledger: every closing-line occurrence the ledger does not
-//     account for, counted per case-insensitive line text, so an author's own
-//     copy of a pipeline-published line is still the author's;
-//   - a body the pipeline never published (no ledger, attestation, or
-//     signature): every closing line;
-//   - anything else (a body an older no-mistakes published before the ledger
-//     existed, or one with an ambiguous ledger): none, as before, because its
-//     generated text may carry closing lines that are not the author's.
-//
-// Whether a candidate is live is GitHub's call, not this parser's: see
-// carriedClosingLines.
-func authorClosingLines(body string) []string {
-	occurrences := closingKeywordLineOccurrences(body)
-	if len(occurrences) == 0 {
-		return nil
+var (
+	// liveClosingPattern matches one closing keyword and its reference in
+	// rendered text, wherever it sits: GitHub honors one inside prose too.
+	liveClosingPattern = regexp.MustCompile(`(?i)\b(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved):?\s+((?:[A-Za-z0-9-]+/[A-Za-z0-9._-]+)?#[1-9][0-9]*)\b`)
+	// renderedCodePattern matches a rendered code element, whose text GitHub
+	// never reads as a closing reference.
+	renderedCodePattern = regexp.MustCompile(`(?is)<pre\b[^>]*>.*?</pre>|<code\b[^>]*>.*?</code>`)
+	renderedTagPattern  = regexp.MustCompile(`<[^>]*>`)
+	// mayReferenceIssuePattern matches whatever a rendered issue reference
+	// could come from: `#` before a digit (escaped or as a numeric entity
+	// too), the `&num;` entity, or an issue or pull request URL.
+	mayReferenceIssuePattern = regexp.MustCompile(`(?i)#[0-9x]|&num;|/(?:issues|pull)/[0-9]`)
+)
+
+// closingTargetOccurrences returns the closingTargetKey of every closing
+// reference in text, one per occurrence, in order.
+func closingTargetOccurrences(text, repo string) []string {
+	var targets []string
+	for _, m := range liveClosingPattern.FindAllStringSubmatch(text, -1) {
+		targets = append(targets, closingTargetKey(m[1], repo))
 	}
-	if recorded, ok := parseClosingLedger(body); ok {
-		remaining := make(map[string]int, len(recorded))
-		for _, line := range recorded {
-			remaining[strings.ToLower(strings.TrimSpace(line))]++
-		}
-		var author []string
-		for _, line := range occurrences {
-			key := strings.ToLower(line)
-			if remaining[key] > 0 {
-				remaining[key]--
-				continue
-			}
-			author = append(author, line)
-		}
-		return distinctClosingLines(author)
-	}
-	if closingLedgerMarkerPattern.MatchString(body) || strings.Contains(body, pipelineAttestationCommentPrefix) || strings.Contains(body, noMistakesPRSignature) {
-		return nil
-	}
-	return distinctClosingLines(occurrences)
+	return targets
 }
 
-// carriedClosingLines returns the author's closing lines of the live body
-// that GitHub itself reports the PR closes: a line is carried only when every
-// reference on it is among the live PR's closing issues, so a line GitHub
-// does not treat as closing (inside an HTML comment or a <pre>/<code>
-// element, say) is never republished as a live one. A failed lookup fails
-// closed rather than guessing.
-func carriedClosingLines(ctx context.Context, sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, body string) ([]string, error) {
-	candidates := authorClosingLines(body)
-	if len(candidates) == 0 {
+// renderedClosingTargets returns the live closing references of body, one
+// closingTargetKey per occurrence, as GitHub's own Markdown renderer shows
+// them: code elements dropped, other tags stripped (link text kept), and
+// entities unescaped. A body with nothing that could render as an issue
+// reference is not sent to the renderer. A failed render fails closed.
+func renderedClosingTargets(ctx context.Context, sctx *pipeline.StepContext, host scm.Host, body string) ([]string, error) {
+	if !mayReferenceIssuePattern.MatchString(body) {
 		return nil, nil
 	}
-	reader, ok := host.(scm.ClosingIssuesReader)
+	renderer, ok := host.(scm.MarkdownRenderer)
 	if !ok {
-		return nil, fmt.Errorf("verify closing issues: provider cannot report the issues the pull request closes")
+		return nil, fmt.Errorf("verify closing issues: provider cannot render the pull request body")
 	}
-	refs, err := reader.GetClosingIssues(ctx, pr)
+	rendered, err := renderer.RenderMarkdown(ctx, body)
 	if err != nil {
-		return nil, fmt.Errorf("verify closing issues: read the issues the pull request closes: %w", err)
+		return nil, fmt.Errorf("verify closing issues: render the pull request body: %w", err)
+	}
+	text := renderedCodePattern.ReplaceAllString(rendered, " ")
+	text = html.UnescapeString(renderedTagPattern.ReplaceAllString(text, ""))
+	return closingTargetOccurrences(text, prRepository(sctx)), nil
+}
+
+// carriedClosingLines returns the author's closing lines of a live ordinary
+// body, for an update about to replace it. The author's references are the
+// live ones (renderedClosingTargets) beyond those the body's ledger records,
+// counted per target, so an author's own copy of a pipeline-published
+// reference is still the author's. A body the pipeline never published (no
+// ledger, attestation, or signature) records nothing. A body an older
+// no-mistakes published before the ledger existed, or one with an ambiguous
+// ledger, carries nothing, as before, because its generated text may hold
+// live references that are not the author's.
+//
+// Each author target is carried once: as the first standalone closing line of
+// the body whose targets are all the author's, else (a reference inside
+// prose, say) as a canonical Closes line.
+func carriedClosingLines(ctx context.Context, sctx *pipeline.StepContext, host scm.Host, body string) ([]string, error) {
+	recorded, ok := parseClosingLedger(body)
+	if !ok && (closingLedgerMarkerPattern.MatchString(body) || strings.Contains(body, pipelineAttestationCommentPrefix) || strings.Contains(body, noMistakesPRSignature)) {
+		return nil, nil
+	}
+	live, err := renderedClosingTargets(ctx, sctx, host, body)
+	if err != nil {
+		return nil, err
+	}
+	unclaimed := make(map[string]int, len(recorded))
+	for _, target := range recorded {
+		unclaimed[strings.ToLower(target)]++
+	}
+	author := map[string]bool{}
+	var order []string
+	for _, target := range live {
+		if unclaimed[target] > 0 {
+			unclaimed[target]--
+			continue
+		}
+		if _, seen := author[target]; !seen {
+			author[target] = true
+			order = append(order, target)
+		}
 	}
 	repo := prRepository(sctx)
-	closed := make(map[string]struct{}, len(refs))
-	for _, ref := range refs {
-		closed[strings.ToLower(closingissues.Localize(ref, repo))] = struct{}{}
-	}
 	var lines []string
-	for _, line := range candidates {
-		live := true
-		for target := range closingTargets([]string{line}, repo) {
-			if _, ok := closed[target]; !ok {
-				live = false
-				break
-			}
+	for _, line := range extractClosingKeywordLines(body) {
+		targets := closingTargetOccurrences(line, repo)
+		if len(targets) == 0 || slices.ContainsFunc(targets, func(target string) bool { return !author[target] }) {
+			continue
 		}
-		if live {
-			lines = append(lines, line)
+		for _, target := range targets {
+			author[target] = false
+		}
+		lines = append(lines, line)
+	}
+	for _, target := range order {
+		if author[target] {
+			lines = append(lines, closingLine(target))
 		}
 	}
 	return lines, nil
@@ -403,40 +420,46 @@ func ordinaryIssuesBlock(sctx *pipeline.StepContext) string {
 
 // carriesClosingLines reports whether an ordinary body on provider carries
 // the ledger and so author closing lines over: GitHub only, the one forge
-// that reports which issues a PR body closes (carriedClosingLines).
+// whose Markdown renderer decides what is live (renderedClosingTargets).
 func carriesClosingLines(provider scm.Provider) bool {
 	return provider == scm.ProviderGitHub
 }
 
 // closingLedgerReserveBytes is room kept free when an ordinary body is fitted
-// to the size cap for ledger entries beyond the requested lines.
+// to the size cap for ledger entries beyond the requested references.
 const closingLedgerReserveBytes = 1024
 
 // sealClosingLedger appends the ledger to a final ordinary body about to be
-// published: every closing-line occurrence the extractor sees in it, with
-// duplicates, except one occurrence per carried author line. Whatever construct a pipeline-published line sat in, the next
-// update reads it with the same extractor and finds it listed, so only lines
-// that appeared after publication are carried as the author's.
-func sealClosingLedger(sctx *pipeline.StepContext, provider scm.Provider, body string) (string, error) {
+// published: every live closing reference GitHub renders in it, one per
+// occurrence, except those of the carried author lines. Whatever construct a
+// pipeline-published reference sat in, the next update renders it the same
+// way and finds it recorded, so only references that appeared after
+// publication are carried as the author's.
+func sealClosingLedger(ctx context.Context, sctx *pipeline.StepContext, host scm.Host, provider scm.Provider, body string) (string, error) {
 	if !carriesClosingLines(provider) {
 		return body, nil
 	}
-	carried := make(map[string]int, len(sctx.CarriedClosingLines))
+	live, err := renderedClosingTargets(ctx, sctx, host, body)
+	if err != nil {
+		return "", err
+	}
+	carried := map[string]int{}
 	for _, line := range sctx.CarriedClosingLines {
-		carried[strings.ToLower(line)]++
+		for _, target := range closingTargetOccurrences(line, prRepository(sctx)) {
+			carried[target]++
+		}
 	}
 	published := []string{}
-	for _, line := range closingKeywordLineOccurrences(body) {
-		key := strings.ToLower(line)
-		if carried[key] > 0 {
-			carried[key]--
+	for _, target := range live {
+		if carried[target] > 0 {
+			carried[target]--
 			continue
 		}
-		published = append(published, line)
+		published = append(published, target)
 	}
 	body = appendIssuesSection(body, renderClosingLedger(published))
 	if len(body) > maxPullRequestBodyBytes {
-		return "", fmt.Errorf("render closing issues: PR body exceeds the size limit after recording its closing lines")
+		return "", fmt.Errorf("render closing issues: PR body exceeds the size limit after recording its closing references")
 	}
 	return body, nil
 }

@@ -13,10 +13,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/kunchenguid/no-mistakes/internal/fakegfm"
 	"github.com/kunchenguid/no-mistakes/internal/scm/plugin/fakeplugin"
 )
 
@@ -515,8 +517,8 @@ func fakeCIGHReconcileHandler(args []string) {
 }
 
 func fakeGHHandlePRContentCommands(args []string, joined string) {
-	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json closingIssuesReferences") {
-		fakeGHPrintClosingIssues()
+	if len(args) > 0 && args[0] == "api" && slices.Contains(args, "markdown") {
+		fakeGHRenderMarkdown()
 	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json title,body") {
 		if raw, ok := os.LookupEnv("FAKE_CLI_PR_CONTENT_JSON"); ok {
@@ -554,39 +556,21 @@ func fakeGHHandlePRContentCommands(args []string, joined string) {
 	}
 }
 
-// fakeGHPrintClosingIssues answers `gh pr view --json closingIssuesReferences`
-// from FAKE_CLI_PR_CLOSING_ISSUES, a comma-separated list of
-// owner/repository#number references standing in for GitHub's own judgement
-// of what the live body closes. FAKE_CLI_PR_CLOSING_ISSUES_ERR fails the call.
-func fakeGHPrintClosingIssues() {
-	if msg := os.Getenv("FAKE_CLI_PR_CLOSING_ISSUES_ERR"); msg != "" {
+// fakeGHRenderMarkdown answers `gh api markdown --input -` with the fake GFM
+// renderer (internal/fakegfm). FAKE_CLI_MARKDOWN_ERR fails the call.
+func fakeGHRenderMarkdown() {
+	if msg := os.Getenv("FAKE_CLI_MARKDOWN_ERR"); msg != "" {
 		fmt.Fprintln(os.Stderr, msg)
 		os.Exit(1)
 	}
-	type repository struct {
-		Name  string            `json:"name"`
-		Owner map[string]string `json:"owner"`
+	var request struct {
+		Text string `json:"text"`
 	}
-	type reference struct {
-		Number     int        `json:"number"`
-		Repository repository `json:"repository"`
-	}
-	refs := []reference{}
-	for _, ref := range strings.Split(os.Getenv("FAKE_CLI_PR_CLOSING_ISSUES"), ",") {
-		slug, number, ok := strings.Cut(strings.TrimSpace(ref), "#")
-		owner, name, _ := strings.Cut(slug, "/")
-		n, err := strconv.Atoi(number)
-		if !ok || err != nil {
-			continue
-		}
-		refs = append(refs, reference{Number: n, Repository: repository{Name: name, Owner: map[string]string{"login": owner}}})
-	}
-	payload, err := json.Marshal(map[string]any{"closingIssuesReferences": refs})
-	if err != nil {
+	if err := json.NewDecoder(os.Stdin).Decode(&request); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Println(string(payload))
+	fmt.Print(fakegfm.Render(request.Text))
 	os.Exit(0)
 }
 

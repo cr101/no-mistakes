@@ -182,7 +182,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			// This update replaces the whole body. Carry the author's own
 			// closing lines over so it never silently unlinks an issue (#763).
 			if carriesClosingLines(provider) {
-				sctx.CarriedClosingLines, err = carriedClosingLines(ctx, sctx, host, existing, live.Body)
+				sctx.CarriedClosingLines, err = carriedClosingLines(ctx, sctx, host, live.Body)
 				if err != nil {
 					return nil, err
 				}
@@ -204,7 +204,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				if err != nil {
 					return nil, fmt.Errorf("re-read existing PR before publication: %w", err)
 				}
-				carried, err := carriedClosingLines(ctx, sctx, host, existing, latest.Body)
+				carried, err := carriedClosingLines(ctx, sctx, host, latest.Body)
 				if err != nil {
 					return nil, err
 				}
@@ -216,7 +216,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					return nil, err
 				}
 			}
-			content.Body, err = sealClosingLedger(sctx, provider, content.Body)
+			content.Body, err = sealClosingLedger(ctx, sctx, host, provider, content.Body)
 			if err != nil {
 				return nil, err
 			}
@@ -251,7 +251,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return nil, err
 	}
 	if template == "" {
-		content.Body, err = sealClosingLedger(sctx, provider, content.Body)
+		content.Body, err = sealClosingLedger(ctx, sctx, host, provider, content.Body)
 		if err != nil {
 			return nil, err
 		}
