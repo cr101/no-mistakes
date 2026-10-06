@@ -91,8 +91,16 @@ func runGhStub(args []string) int {
 }
 
 // runGhMarkdownStub answers `gh api markdown --input -` with the fake GFM
-// renderer (internal/fakegfm), standing in for GitHub's own.
+// renderer (internal/fakegfm), standing in for GitHub's own. A
+// "<FAKEAGENT_GH_STATE>.render-fail" file makes it fail, so a journey can
+// break the renderer mid-run.
 func runGhMarkdownStub() int {
+	if state := os.Getenv("FAKEAGENT_GH_STATE"); state != "" {
+		if _, err := os.Stat(state + ".render-fail"); err == nil {
+			fmt.Fprintln(os.Stderr, "fakeagent gh markdown: renderer unavailable (e2e knob)")
+			return 1
+		}
+	}
 	var request struct {
 		Text string `json:"text"`
 	}

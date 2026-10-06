@@ -7,6 +7,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 const closingLedgerMarker = "<!-- no-mistakes-closing-lines"
@@ -190,4 +194,110 @@ func TestAuthorClosingLinesHandWrittenAndLegacyBodiesJourney(t *testing.T) {
 	if !strings.Contains(body, "legacy update") {
 		t.Errorf("legacy: intent not rendered, forged-ledger escape not exercised; body:\n%s", body)
 	}
+}
+
+// TestAuthorClosingLinesRenderedLivenessJourney covers the cases decided by
+// GitHub's Markdown renderer: an author's commented-out copy of a pipeline
+// line never keeps that pipeline line alive, a stray inline "<!--" does not
+// hide a later author line, an author duplicate of a pipeline line survives
+// exactly once, and a renderer failure fails the PR step without touching
+// the live body.
+func TestAuthorClosingLinesRenderedLivenessJourney(t *testing.T) {
+	h := NewHarness(t, SetupOpts{Agent: "claude"})
+	statePath := setupStatefulGitHub(t, h)
+	if out, err := h.Run("init"); err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	const branch = "feature/carry-rendered"
+	h.CommitChange(branch, "rendered.txt", "v1\n", "add rendered fixture")
+	wt := h.AddWorktree(branch)
+	if out, err := h.RunInDir(wt, "axi", "run", "--intent", "rendered liveness", "--skip", "ci", "--closes", "5"); err != nil {
+		t.Fatalf("axi run --closes 5: %v\n%s", err, out)
+	}
+	first := waitPublished(t, h, branch, "", "first publish")
+	assertLinesOnce(t, "first publish", livePRBody(t, statePath, branch), "Closes #5")
+
+	// Greptile: a commented-out author "Closes #5" before the pipeline's own
+	// line must not keep #5; a stray inline "<!--" must not hide Closes #4.
+	editLivePRBody(t, statePath, branch, func(b string) string {
+		return "<!--\nCloses #5\n-->\n\n" + b + "\nDrops stray <!-- markers\n\nCloses #4\n"
+	})
+	saveEvidence(t, "carry-11-commented-copy-and-stray-marker.md", livePRBody(t, statePath, branch))
+	h.Checkout("main")
+	h.RemoveWorktree(wt)
+	h.CommitChange(branch, "rendered.txt", "v2\n", "update rendered fixture")
+	h.PushToGate(branch)
+	second := waitPublished(t, h, branch, first.ID, "plain push")
+	body := livePRBody(t, statePath, branch)
+	saveEvidence(t, "carry-12-commented-copy-dropped.md", body)
+	assertLinesOnce(t, "plain push", body, "Closes #4")
+	assertNoLine(t, "plain push", body, "Closes #5")
+
+	// Author duplicate: the pipeline publishes Closes #5 again, the author
+	// adds their own copy, and a run without --closes keeps exactly one.
+	wt = h.AddWorktree(branch)
+	if out, err := h.RunInDir(wt, "rerun", "--closes", "5"); err != nil || !strings.Contains(out, "Rerun started") {
+		t.Fatalf("rerun --closes 5: %v\n%s", err, out)
+	}
+	third := waitPublished(t, h, branch, second.ID, "rerun --closes 5")
+	assertLinesOnce(t, "rerun --closes 5", livePRBody(t, statePath, branch), "Closes #4", "Closes #5")
+	editLivePRBody(t, statePath, branch, func(b string) string { return b + "\nCloses #5\n" })
+	saveEvidence(t, "carry-13-author-duplicate.md", livePRBody(t, statePath, branch))
+	h.Checkout("main")
+	h.RemoveWorktree(wt)
+	h.CommitChange(branch, "rendered.txt", "v3\n", "update rendered fixture again")
+	h.PushToGate(branch)
+	fourth := waitPublished(t, h, branch, third.ID, "after author duplicate")
+	body = livePRBody(t, statePath, branch)
+	saveEvidence(t, "carry-14-author-duplicate-kept-once.md", body)
+	assertLinesOnce(t, "after author duplicate", body, "Closes #4", "Closes #5")
+	if !strings.Contains(body, `<!-- no-mistakes-closing-lines:v1 [] -->`) {
+		t.Errorf("after author duplicate: carried lines recorded in the ledger; body:\n%s", body)
+	}
+
+	// Renderer failure fails the PR step closed and leaves the body alone.
+	if err := os.WriteFile(statePath+".render-fail", nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h.CommitChange(branch, "rendered.txt", "v4\n", "update rendered fixture under failing renderer")
+	h.PushToGate(branch)
+	deadline := time.Now().Add(3 * time.Minute)
+	var failed *ipc.RunInfo
+	for time.Now().Before(deadline) && failed == nil {
+		for _, r := range h.Runs() {
+			if r.Branch == branch && r.ID != fourth.ID && r.Status.Terminal() {
+				r := r
+				failed = &r
+			}
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if failed == nil {
+		t.Fatal("render failure: run did not finish")
+	}
+	pr, _ := findStep(failed.Steps, types.StepPR)
+	t.Logf("render failure: run status=%s pr step=%s error=%v", failed.Status, pr.Status, deref(pr.Error))
+	saveEvidence(t, "carry-15-render-failure-run.txt",
+		"run status: "+string(failed.Status)+"\npr step status: "+string(pr.Status)+"\npr step error: "+deref(pr.Error)+"\n")
+	if pr.Status != types.StepStatusFailed {
+		t.Errorf("render failure: PR step status=%s, want failed", pr.Status)
+	}
+	// Push re-attests the proposed head before pushing, so only the
+	// attestation line may differ.
+	after := livePRBody(t, statePath, branch)
+	saveEvidence(t, "carry-16-render-failure-body.md", after)
+	if withoutAttestation(after) != withoutAttestation(body) {
+		t.Errorf("render failure: live body changed beyond the attestation:\n%s", after)
+	}
+}
+
+func withoutAttestation(body string) string {
+	var kept []string
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "<!-- no-mistakes-pipeline-attestation:") {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "\n")
 }
