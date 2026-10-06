@@ -564,13 +564,14 @@ func fakeGHRenderMarkdown() {
 		os.Exit(1)
 	}
 	var request struct {
-		Text string `json:"text"`
+		Text    string `json:"text"`
+		Context string `json:"context"`
 	}
 	if err := json.NewDecoder(os.Stdin).Decode(&request); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Print(fakegfm.Render(request.Text))
+	fmt.Print(fakegfm.Render(request.Text, request.Context))
 	os.Exit(0)
 }
 

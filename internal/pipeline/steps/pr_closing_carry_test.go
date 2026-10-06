@@ -111,6 +111,24 @@ func TestPRStep_KeepsAuthorClosingLineAddedToPipelineBody(t *testing.T) {
 	}
 }
 
+// An author's closing line naming the issue by URL, in this repository or
+// another, is carried verbatim; a commented-out one is not.
+func TestPRStep_KeepsAuthorURLClosingLines(t *testing.T) {
+	t.Parallel()
+	runs := newPRStepRuns(t, nil)
+	created := runs.create()
+	runs.authorEdits(created + "\n\nCloses https://github.com/test/repo/issues/12\nFixes https://github.com/cli/cli/issues/5\n\n<!--\nCloses https://github.com/test/repo/issues/13\n-->\n")
+
+	updated := runs.update()
+	want := "Closes https://github.com/test/repo/issues/12|Fixes https://github.com/cli/cli/issues/5"
+	if got := closingLinesOf(updated); got != want {
+		t.Fatalf("closing lines = %q, want %q:\n%s", got, want, updated)
+	}
+	if again := runs.update(); closingLinesOf(again) != want {
+		t.Fatalf("after a second update closing lines = %q:\n%s", closingLinesOf(again), again)
+	}
+}
+
 // The ledger keeps the pipeline's own --closes lines apart from the author's:
 // a later run without --closes drops them, as before, while the author's
 // line stays.
@@ -204,6 +222,16 @@ func TestCarriedClosingLines(t *testing.T) {
 		"closing line in its own paragraph": {
 			body: "Summary.\n\nCloses #4" + ledger(),
 			want: "Closes #4",
+		},
+		"URL closing lines in this and another repository": {
+			body: "Closes https://github.com/test/repo/issues/12\nFixes https://github.com/cli/cli/pull/5\n\n## Issues\n\nCloses #7" + ledger("7"),
+			want: "Closes https://github.com/test/repo/issues/12|Fixes https://github.com/cli/cli/pull/5",
+		},
+		"commented-out URL closing line": {
+			body: "<!--\nCloses https://github.com/test/repo/issues/12\n-->" + ledger(),
+		},
+		"URL closing line on another host": {
+			body: "Closes https://gitlab.com/test/repo/issues/12" + ledger(),
 		},
 		"reference in prose": {
 			body: "This also fixes #8 for good." + ledger(),

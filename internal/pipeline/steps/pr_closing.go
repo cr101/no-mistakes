@@ -37,7 +37,11 @@ import (
 
 const issuesSectionHeading = "## Issues"
 
-const closingKeywordPattern = `(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved):?\s+(?:#[1-9][0-9]*|[A-Za-z0-9-]+/[A-Za-z0-9._-]+#[1-9][0-9]*)`
+// closingURLPattern matches an issue or pull request URL, which GitHub
+// honors as a closing target on its own host (closingTargetKey).
+const closingURLPattern = `https?://[A-Za-z0-9.-]+(?::[0-9]+)?/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/(?:issues|pull)/[1-9][0-9]*`
+
+const closingKeywordPattern = `(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved):?\s+(?:#[1-9][0-9]*|[A-Za-z0-9-]+/[A-Za-z0-9._-]+#[1-9][0-9]*|` + closingURLPattern + `)`
 
 // closingKeywordLinePattern matches a line that consists only of GitHub
 // closing keywords and their targets, optionally as a bullet or ordered list
@@ -46,7 +50,7 @@ const closingKeywordPattern = `(?:close|closes|closed|fix|fixes|fixed|resolve|re
 // standalone closing declaration.
 var closingKeywordLinePattern = regexp.MustCompile(`(?i)^(?:(?:[-*+]|[0-9]+[.)])\s+)?` + closingKeywordPattern + `(?:\s*,\s*` + closingKeywordPattern + `)*[.;!]?$`)
 
-var closingReferencePattern = regexp.MustCompile(`(?i)(?:[A-Za-z0-9-]+/[A-Za-z0-9._-]+#[1-9][0-9]*|#[1-9][0-9]*)`)
+var closingReferencePattern = regexp.MustCompile(`(?i)(?:` + closingURLPattern + `|[A-Za-z0-9-]+/[A-Za-z0-9._-]+#[1-9][0-9]*|#[1-9][0-9]*)`)
 
 // extractClosingKeywordLines returns the distinct standalone closing-keyword
 // lines of body, outside fenced and indented code blocks.
@@ -180,23 +184,47 @@ func outsideInlineCode(line string, rewrite func(string) string) string {
 }
 
 // closingTargets returns the canonical refs ("42", "owner/repo#42") closed
-// by the given closing-keyword lines. A reference qualified with repo, the
-// PR's own repository, is the bare number.
-func closingTargets(lines []string, repo string) map[string]struct{} {
+// by the given closing-keyword lines (closingTargetKey).
+func closingTargets(lines []string, sctx *pipeline.StepContext) map[string]struct{} {
 	targets := map[string]struct{}{}
 	for _, line := range lines {
 		for _, target := range closingReferencePattern.FindAllString(line, -1) {
-			targets[closingTargetKey(target, repo)] = struct{}{}
+			if key := closingTargetKey(target, sctx); key != "" {
+				targets[key] = struct{}{}
+			}
 		}
 	}
 	return targets
 }
 
+var closingURLPartsPattern = regexp.MustCompile(`(?i)^https?://([A-Za-z0-9.-]+)(?::[0-9]+)?/([A-Za-z0-9-]+/[A-Za-z0-9._-]+)/(?:issues|pull)/([1-9][0-9]*)$`)
+
 // closingTargetKey is the canonical, case-folded form of a reference target
 // ("#42" -> "42", "owner/repo#42"), with the PR's own repository written as
-// the bare number.
-func closingTargetKey(target, repo string) string {
-	return strings.ToLower(closingissues.Localize(strings.TrimPrefix(target, "#"), repo))
+// the bare number. An issue or pull request URL is "owner/repo#42" when it
+// is on github.com or the PR's own host, and "" (no target) otherwise.
+func closingTargetKey(target string, sctx *pipeline.StepContext) string {
+	if m := closingURLPartsPattern.FindStringSubmatch(target); m != nil {
+		if host := strings.ToLower(m[1]); host != "github.com" && host != prHost(sctx) {
+			return ""
+		}
+		target = m[2] + "#" + m[3]
+	}
+	return strings.ToLower(closingissues.Localize(strings.TrimPrefix(target, "#"), prRepository(sctx)))
+}
+
+// prHost returns the host the PR lives on, or "" when it is unknown.
+func prHost(sctx *pipeline.StepContext) string {
+	if sctx == nil {
+		return ""
+	}
+	if sctx.Repo != nil && sctx.Repo.UpstreamURL != "" {
+		return scm.ExtractHost(sctx.Repo.UpstreamURL)
+	}
+	if sctx.Run != nil && sctx.Run.PRURL != nil {
+		return scm.ExtractHost(*sctx.Run.PRURL)
+	}
+	return ""
 }
 
 // prRepository returns the owner/repository the PR lives in, or "" when it
@@ -228,7 +256,7 @@ func requestedClosingLines(sctx *pipeline.StepContext, existing []string) []stri
 		return nil
 	}
 	var lines []string
-	present := closingTargets(existing, prRepository(sctx))
+	present := closingTargets(existing, sctx)
 	for _, ref := range sctx.ClosingIssueRefs {
 		key := strings.ToLower(ref)
 		if _, exists := present[key]; exists {
@@ -308,7 +336,7 @@ var (
 	// rendered text, wherever it sits: GitHub honors one inside prose too.
 	// The two are paired only across horizontal whitespace, never a line
 	// break, so text in separate rendered blocks is never joined.
-	liveClosingPattern = regexp.MustCompile(`(?i)\b(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved):?[ \t]+((?:[A-Za-z0-9-]+/[A-Za-z0-9._-]+)?#[1-9][0-9]*)\b`)
+	liveClosingPattern = regexp.MustCompile(`(?i)\b(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved):?[ \t]+(` + closingURLPattern + `|(?:[A-Za-z0-9-]+/[A-Za-z0-9._-]+)?#[1-9][0-9]*)\b`)
 	// renderedCodePattern matches a rendered code element, whose text GitHub
 	// never reads as a closing reference.
 	renderedCodePattern = regexp.MustCompile(`(?is)<pre\b[^>]*>.*?</pre>|<code\b[^>]*>.*?</code>`)
@@ -324,10 +352,12 @@ var (
 
 // closingTargetOccurrences returns the closingTargetKey of every closing
 // reference in text, one per occurrence, in order.
-func closingTargetOccurrences(text, repo string) []string {
+func closingTargetOccurrences(text string, sctx *pipeline.StepContext) []string {
 	var targets []string
 	for _, m := range liveClosingPattern.FindAllStringSubmatch(text, -1) {
-		targets = append(targets, closingTargetKey(m[1], repo))
+		if key := closingTargetKey(m[1], sctx); key != "" {
+			targets = append(targets, key)
+		}
 	}
 	return targets
 }
@@ -353,7 +383,7 @@ func renderedClosingTargets(ctx context.Context, sctx *pipeline.StepContext, hos
 	text := renderedCodePattern.ReplaceAllString(rendered, " ")
 	text = renderedBlockTagPattern.ReplaceAllString(text, "\n")
 	text = html.UnescapeString(renderedTagPattern.ReplaceAllString(text, ""))
-	return closingTargetOccurrences(text, prRepository(sctx)), nil
+	return closingTargetOccurrences(text, sctx), nil
 }
 
 // carriedClosingLines returns the author's closing lines of a live ordinary
@@ -394,10 +424,9 @@ func carriedClosingLines(ctx context.Context, sctx *pipeline.StepContext, host s
 			order = append(order, target)
 		}
 	}
-	repo := prRepository(sctx)
 	var lines []string
 	for _, line := range extractClosingKeywordLines(body) {
-		targets := closingTargetOccurrences(line, repo)
+		targets := closingTargetOccurrences(line, sctx)
 		if len(targets) == 0 || slices.ContainsFunc(targets, func(target string) bool { return !author[target] }) {
 			continue
 		}
@@ -452,7 +481,7 @@ func sealClosingLedger(ctx context.Context, sctx *pipeline.StepContext, host scm
 	}
 	carried := map[string]int{}
 	for _, line := range sctx.CarriedClosingLines {
-		for _, target := range closingTargetOccurrences(line, prRepository(sctx)) {
+		for _, target := range closingTargetOccurrences(line, sctx) {
 			carried[target]++
 		}
 	}
@@ -606,7 +635,7 @@ func verifyClosingIssuesInBody(body string, sctx *pipeline.StepContext) error {
 			return fmt.Errorf("verify closing issues: pull request body dropped the author's closing line %q", line)
 		}
 	}
-	targets := closingTargets(present, prRepository(sctx))
+	targets := closingTargets(present, sctx)
 	for _, ref := range sctx.ClosingIssueRefs {
 		if _, ok := targets[strings.ToLower(ref)]; !ok {
 			return fmt.Errorf("verify closing issues: pull request body is missing %s", closingLine(ref))

@@ -14,7 +14,10 @@
 //   - a table row renders each cell in its own <td> on its own line (the
 //     delimiter row renders nothing), and a `-`, `*`, or `+` list item
 //     renders inside <ul><li>, so text in separate blocks is never on one
-//     line.
+//     line;
+//   - a github.com issue or pull request URL outside code renders as a link
+//     whose text is `#N` in the context repository and `owner/repo#N` in
+//     another.
 //
 // Everything else passes through unchanged.
 package fakegfm
@@ -30,10 +33,12 @@ var (
 	inlineCommentPattern  = regexp.MustCompile(`<!--.*?-->`)
 	tableDelimiterPattern = regexp.MustCompile(`^\|[\s|:-]*$`)
 	listItemPattern       = regexp.MustCompile(`^[-*+][ \t]+`)
+	issueURLPattern       = regexp.MustCompile(`https?://github\.com/([A-Za-z0-9-]+/[A-Za-z0-9._-]+)/(?:issues|pull)/([1-9][0-9]*)\b`)
 )
 
-// Render returns text rendered to HTML as GitHub would for the subset above.
-func Render(text string) string {
+// Render returns text rendered to HTML as GitHub would for the subset above,
+// in the context of repo ("owner/name").
+func Render(text, repo string) string {
 	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
 	var out []string
 	fence := ""
@@ -62,13 +67,13 @@ func Render(text string) string {
 			}
 			row := []string{"<tr>"}
 			for _, cell := range strings.Split(strings.Trim(strings.TrimSpace(trimmed), "|"), "|") {
-				row = append(row, "<td>"+renderInline(strings.TrimSpace(cell))+"</td>")
+				row = append(row, "<td>"+renderInline(repo, strings.TrimSpace(cell))+"</td>")
 			}
 			out = append(out, append(row, "</tr>")...)
 		case blockStart && listItemPattern.MatchString(trimmed):
-			out = append(out, "<ul>", "<li>"+renderInline(listItemPattern.ReplaceAllString(trimmed, ""))+"</li>", "</ul>")
+			out = append(out, "<ul>", "<li>"+renderInline(repo, listItemPattern.ReplaceAllString(trimmed, ""))+"</li>", "</ul>")
 		default:
-			out = append(out, renderInline(line))
+			out = append(out, renderInline(repo, line))
 		}
 	}
 	if fence != "" {
@@ -77,10 +82,27 @@ func Render(text string) string {
 	return strings.Join(out, "\n")
 }
 
-func renderInline(line string) string {
-	line = codeSpanPattern.ReplaceAllStringFunc(line, func(span string) string {
-		return "<code>" + html.EscapeString(span[1:len(span)-1]) + "</code>"
-	})
+func renderInline(repo, line string) string {
+	var out strings.Builder
+	last := 0
+	for _, span := range codeSpanPattern.FindAllStringIndex(line, -1) {
+		out.WriteString(linkIssueURLs(repo, line[last:span[0]]))
+		out.WriteString("<code>" + html.EscapeString(line[span[0]+1:span[1]-1]) + "</code>")
+		last = span[1]
+	}
+	out.WriteString(linkIssueURLs(repo, line[last:]))
+	line = out.String()
 	line = inlineCommentPattern.ReplaceAllString(line, "")
 	return strings.ReplaceAll(line, "<!--", "&lt;!--")
+}
+
+func linkIssueURLs(repo, text string) string {
+	return issueURLPattern.ReplaceAllStringFunc(text, func(url string) string {
+		m := issueURLPattern.FindStringSubmatch(url)
+		label := m[1] + "#" + m[2]
+		if strings.EqualFold(m[1], repo) {
+			label = "#" + m[2]
+		}
+		return `<a href="` + url + `">` + label + "</a>"
+	})
 }

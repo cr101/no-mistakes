@@ -102,13 +102,14 @@ func runGhMarkdownStub() int {
 		}
 	}
 	var request struct {
-		Text string `json:"text"`
+		Text    string `json:"text"`
+		Context string `json:"context"`
 	}
 	if err := json.NewDecoder(os.Stdin).Decode(&request); err != nil {
 		fmt.Fprintf(os.Stderr, "fakeagent gh markdown: %v\n", err)
 		return 1
 	}
-	fmt.Print(fakegfm.Render(request.Text))
+	fmt.Print(fakegfm.Render(request.Text, request.Context))
 	return 0
 }
 

@@ -36,12 +36,25 @@ func TestRender(t *testing.T) {
 			in:   "Fixes:\n- #5",
 			want: "Fixes:\n<ul>\n<li>#5</li>\n</ul>",
 		},
+		// Verified live against GitHub's renderer.
+		"issue URL in the context repository": {
+			in:   "Closes https://github.com/test/repo/issues/12",
+			want: `Closes <a href="https://github.com/test/repo/issues/12">#12</a>`,
+		},
+		"issue URL in another repository": {
+			in:   "Fixes https://github.com/cli/cli/issues/5",
+			want: `Fixes <a href="https://github.com/cli/cli/issues/5">cli/cli#5</a>`,
+		},
+		"issue URL in a code span": {
+			in:   "Fixes `https://github.com/cli/cli/pull/5`",
+			want: "Fixes <code>https://github.com/cli/cli/pull/5</code>",
+		},
 		"fenced code": {
 			in:   "```\nFixes #9 <b>\n```",
 			want: "<pre><code>\nFixes #9 &lt;b&gt;\n</code></pre>",
 		},
 	} {
-		if got := Render(tc.in); got != tc.want {
+		if got := Render(tc.in, "test/repo"); got != tc.want {
 			t.Errorf("%s: Render(%q) = %q, want %q", name, tc.in, got, tc.want)
 		}
 	}
