@@ -28,6 +28,14 @@ func TestRender(t *testing.T) {
 			in:   "<pre>\nFixes #9\n</pre>",
 			want: "<pre>\nFixes #9\n</pre>",
 		},
+		"table row cells render as separate blocks": {
+			in:   "| kind | ref |\n| --- | --- |\n| fix | #5 |",
+			want: "<tr>\n<td>kind</td>\n<td>ref</td>\n</tr>\n<tr>\n<td>fix</td>\n<td>#5</td>\n</tr>",
+		},
+		"list item renders as its own block": {
+			in:   "Fixes:\n- #5",
+			want: "Fixes:\n<ul>\n<li>#5</li>\n</ul>",
+		},
 		"fenced code": {
 			in:   "```\nFixes #9 <b>\n```",
 			want: "<pre><code>\nFixes #9 &lt;b&gt;\n</code></pre>",

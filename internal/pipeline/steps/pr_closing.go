@@ -306,11 +306,16 @@ func parseClosingLedger(body string) (targets []string, ok bool) {
 var (
 	// liveClosingPattern matches one closing keyword and its reference in
 	// rendered text, wherever it sits: GitHub honors one inside prose too.
-	liveClosingPattern = regexp.MustCompile(`(?i)\b(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved):?\s+((?:[A-Za-z0-9-]+/[A-Za-z0-9._-]+)?#[1-9][0-9]*)\b`)
+	// The two are paired only across horizontal whitespace, never a line
+	// break, so text in separate rendered blocks is never joined.
+	liveClosingPattern = regexp.MustCompile(`(?i)\b(?:close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved):?[ \t]+((?:[A-Za-z0-9-]+/[A-Za-z0-9._-]+)?#[1-9][0-9]*)\b`)
 	// renderedCodePattern matches a rendered code element, whose text GitHub
 	// never reads as a closing reference.
 	renderedCodePattern = regexp.MustCompile(`(?is)<pre\b[^>]*>.*?</pre>|<code\b[^>]*>.*?</code>`)
 	renderedTagPattern  = regexp.MustCompile(`<[^>]*>`)
+	// renderedBlockTagPattern matches a rendered block-level tag, which
+	// strips to a line break so separate blocks stay apart.
+	renderedBlockTagPattern = regexp.MustCompile(`(?i)</?(?:p|li|ul|ol|td|th|tr|table|thead|tbody|tfoot|div|h[1-6]|blockquote|br|hr)\b[^>]*>`)
 	// mayReferenceIssuePattern matches whatever a rendered issue reference
 	// could come from: `#` before a digit (escaped or as a numeric entity
 	// too), the `&num;` entity, or an issue or pull request URL.
@@ -329,7 +334,8 @@ func closingTargetOccurrences(text, repo string) []string {
 
 // renderedClosingTargets returns the live closing references of body, one
 // closingTargetKey per occurrence, as GitHub's own Markdown renderer shows
-// them: code elements dropped, other tags stripped (link text kept), and
+// them: code elements dropped, block tags turned into line breaks, other
+// tags stripped (link text kept), and
 // entities unescaped. A body with nothing that could render as an issue
 // reference is not sent to the renderer. A failed render fails closed.
 func renderedClosingTargets(ctx context.Context, sctx *pipeline.StepContext, host scm.Host, body string) ([]string, error) {
@@ -345,6 +351,7 @@ func renderedClosingTargets(ctx context.Context, sctx *pipeline.StepContext, hos
 		return nil, fmt.Errorf("verify closing issues: render the pull request body: %w", err)
 	}
 	text := renderedCodePattern.ReplaceAllString(rendered, " ")
+	text = renderedBlockTagPattern.ReplaceAllString(text, "\n")
 	text = html.UnescapeString(renderedTagPattern.ReplaceAllString(text, ""))
 	return closingTargetOccurrences(text, prRepository(sctx)), nil
 }

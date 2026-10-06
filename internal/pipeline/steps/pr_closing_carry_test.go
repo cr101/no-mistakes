@@ -194,6 +194,17 @@ func TestCarriedClosingLines(t *testing.T) {
 		"comment, pre, and code author lines": {
 			body: "<!--\nCloses #5\n-->\n\n<pre>\nFixes #9\n</pre>\n\n<code>Fixes #2</code>\n\n`Fixes #3`" + ledger(),
 		},
+		// A keyword and a reference in separate rendered blocks never pair.
+		"keyword and reference in separate table cells": {
+			body: "| kind | ref |\n| --- | --- |\n| fix | #5 |" + ledger(),
+		},
+		"keyword before a list of references": {
+			body: "Fixes:\n- #5" + ledger(),
+		},
+		"closing line in its own paragraph": {
+			body: "Summary.\n\nCloses #4" + ledger(),
+			want: "Closes #4",
+		},
 		"reference in prose": {
 			body: "This also fixes #8 for good." + ledger(),
 			want: "Closes #8",
@@ -244,6 +255,21 @@ func TestSealClosingLedgerRecordsWhatRendersLive(t *testing.T) {
 	}
 	if strings.Join(carried, "|") != "Closes owner/repo#7" {
 		t.Fatalf("carried = %q, want only the author's line", carried)
+	}
+}
+
+// The ledger pairs a keyword and a reference only within one rendered block.
+func TestSealClosingLedgerIgnoresReferencesAcrossBlocks(t *testing.T) {
+	t.Parallel()
+	sctx, host := fakeGitHubRenderer(t)
+	body := "| kind | ref |\n| --- | --- |\n| fix | #5 |\n\nFixes:\n- #6\n\nCloses #4"
+
+	sealed, err := sealClosingLedger(context.Background(), sctx, host, scm.ProviderGitHub, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if targets, ok := parseClosingLedger(sealed); !ok || strings.Join(targets, "|") != "4" {
+		t.Fatalf("ledger = %q, %v; want only the paragraph's #4", targets, ok)
 	}
 }
 

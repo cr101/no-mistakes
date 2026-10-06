@@ -10,7 +10,11 @@
 //   - a stray inline `<!--` with no closing `-->` is literal text and hides
 //     nothing after it;
 //   - fenced code renders inside <pre><code>, an inline code span inside
-//     <code>, and raw <pre>/<code> elements stay as written.
+//     <code>, and raw <pre>/<code> elements stay as written;
+//   - a table row renders each cell in its own <td> on its own line (the
+//     delimiter row renders nothing), and a `-`, `*`, or `+` list item
+//     renders inside <ul><li>, so text in separate blocks is never on one
+//     line.
 //
 // Everything else passes through unchanged.
 package fakegfm
@@ -22,8 +26,10 @@ import (
 )
 
 var (
-	codeSpanPattern      = regexp.MustCompile("`([^`]+)`")
-	inlineCommentPattern = regexp.MustCompile(`<!--.*?-->`)
+	codeSpanPattern       = regexp.MustCompile("`([^`]+)`")
+	inlineCommentPattern  = regexp.MustCompile(`<!--.*?-->`)
+	tableDelimiterPattern = regexp.MustCompile(`^\|[\s|:-]*$`)
+	listItemPattern       = regexp.MustCompile(`^[-*+][ \t]+`)
 )
 
 // Render returns text rendered to HTML as GitHub would for the subset above.
@@ -50,6 +56,17 @@ func Render(text string) string {
 			for i < len(lines) && !strings.Contains(lines[i], "-->") {
 				i++
 			}
+		case blockStart && strings.HasPrefix(trimmed, "|"):
+			if tableDelimiterPattern.MatchString(trimmed) {
+				continue
+			}
+			row := []string{"<tr>"}
+			for _, cell := range strings.Split(strings.Trim(strings.TrimSpace(trimmed), "|"), "|") {
+				row = append(row, "<td>"+renderInline(strings.TrimSpace(cell))+"</td>")
+			}
+			out = append(out, append(row, "</tr>")...)
+		case blockStart && listItemPattern.MatchString(trimmed):
+			out = append(out, "<ul>", "<li>"+renderInline(listItemPattern.ReplaceAllString(trimmed, ""))+"</li>", "</ul>")
 		default:
 			out = append(out, renderInline(line))
 		}
