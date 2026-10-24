@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
@@ -16,7 +15,9 @@ import (
 // /SC ONLOGON registration failed with Access is denied; this asserts the
 // registered task's logon trigger is scoped to the current user and runs on a
 // limited interactive token. The task is disposable (unique per-root name,
-// cmd.exe action, deleted on cleanup) and never fires during the test.
+// deleted on cleanup) and its action is a nonexistent executable, so a task
+// leaked by a killed test process fails silently at logon instead of running
+// anything. Task Scheduler does not validate the action path at registration.
 func TestInstallWindowsTaskRegistersUserScopedLogonTask(t *testing.T) {
 	if testing.Short() {
 		t.Skip("registers a real scheduled task")
@@ -33,7 +34,7 @@ func TestInstallWindowsTaskRegistersUserScopedLogonTask(t *testing.T) {
 	taskName := windowsTaskName(p)
 	t.Cleanup(func() { _, _ = runServiceCommand("schtasks", "/Delete", "/TN", taskName, "/F") })
 
-	exe := filepath.Join(os.Getenv("WINDIR"), "System32", "cmd.exe")
+	exe := filepath.Join(t.TempDir(), "missing", "no-mistakes.exe")
 	if err := installWindowsTask(p, exe); err != nil {
 		t.Fatalf("installWindowsTask: %v", err)
 	}
